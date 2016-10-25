@@ -284,9 +284,7 @@ def greedy_dec(length,
                initial_state, 
                memory, 
                iter_fn, 
-               embedding, 
-               beam_size=1, 
-               num_candidates=1):
+               embedding):
   """ A greedy decoder.
 
   """
@@ -317,7 +315,6 @@ def stochastic_dec(length,
                    memory,
                    iter_fn,
                    embedding,
-                   beam_size=1,
                    num_candidates=1):
   """ A stochastic decoder.
 
@@ -349,7 +346,7 @@ def stochastic_dec(length,
     symbol = tf.squeeze(tf.multinomial(logits, 1), [1])
     seq.append(symbol)
 
-  return tf.pack(seq, 1)
+  return tf.reshape(tf.pack(seq, 1), [batch_size, num_candidates, length])
 
 # beam decoder
 def beam_dec(length,
@@ -357,6 +354,7 @@ def beam_dec(length,
              memory,
              iter_fn,
              embedding,
+             gamma=0.0,
              beam_size=100,
              num_candidates=10):
   """ A basic beam decoder
@@ -416,7 +414,7 @@ def beam_dec(length,
     prev += tf.expand_dims(best_probs, 2)
 
     # add the path and score of the candidates in the current beam to the lists
-    close_score = tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2]) / (float(i+1) ** 0.65)
+    close_score = tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2]) / (float(i+1) ** gamma)
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
     scores.append(close_score)
@@ -435,8 +433,7 @@ def beam_dec(length,
   scores = tf.concat(1, scores)
   best_scores, indices = tf.nn.top_k(scores, num_candidates)
   indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * beam_size * length, 1) + indices, [-1])
-  best_candidates = tf.gather(candidates, indices)
-  best_scores = tf.reshape(best_scores, [-1])
+  best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
 
   return best_candidates, best_scores
 
