@@ -432,7 +432,7 @@ def beam_dec(length,
   candidates = tf.reshape(tf.concat(1, candidates), [-1, length])
   scores = tf.concat(1, scores)
   best_scores, indices = tf.nn.top_k(scores, num_candidates)
-  indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * beam_size * length, 1) + indices, [-1])
+  indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * beam_size * (length-1), 1) + indices, [-1])
   best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
 
   return best_candidates, best_scores
