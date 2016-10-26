@@ -387,7 +387,7 @@ def beam_dec(length,
       memory_prime.append(tf.reshape(tf.tile(m, [1] + [beam_size] + [1]*(len(mdim)-1)),
           [-1]+mdim[1:]))
     memory = tuple(memory_prime)
-  else:
+  elif memory != None:
     mdim = [d.value for d in memory.get_shape()]
     memory = tf.expand_dims(memory, 1)
     memory = tf.reshape(tf.tile(memory, [1] + [beam_size] + [1]*(len(mdim)-1)),
