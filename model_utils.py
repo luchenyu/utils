@@ -668,7 +668,7 @@ def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True
     logits_src = tf.reshape(tf.unsorted_segment_sum(data, indices, batch_size*beam_size*vocab_size),
         [batch_size, beam_size, vocab_size])
     if outputs.get_shape().ndims == 2:
-      logits_src = tf.reshape(logits, [-1, vocab_size])
+      logits_src = tf.reshape(logits_src, [-1, vocab_size])
     logits = switches*logits_static + (1-switches)*logits_src
     return logits
   return logit_fn
