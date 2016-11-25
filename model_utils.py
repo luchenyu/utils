@@ -642,12 +642,12 @@ def attention_iter(inputs,
 
 def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True):
   def logit_fn(outputs):
-    switches = fully_connected(outputs, 1, activation_fn=tf.sigmoid,
-        is_training=is_training, scope="switches")
     batch_size = tf.shape(source_embedding)[0]
     length = tf.shape(source_embedding)[1]
     size = tf.shape(outputs)[-1]
     vocab_size = tf.shape(char_embedding)[0]
+    switches = tf.reshape(fully_connected(outputs, 1, activation_fn=tf.sigmoid,
+        is_training=is_training, scope="switches"), [batch_size, -1, 1])
     logits_fix = tf.reshape(tf.matmul(tf.reshape(outputs, [-1, size]), tf.transpose(char_embedding)), 
         [batch_size, -1, vocab_size])
     logits_ptr = tf.batch_matmul(tf.reshape(outputs, [batch_size, -1, size]),
@@ -661,10 +661,10 @@ def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True
         [-1, length]) + tf.expand_dims(tf.range(batch_size*beam_size) * vocab_size, 1), [-1])
     logits_src = tf.reshape(tf.unsorted_segment_sum(data, indices, batch_size*beam_size*vocab_size),
         [batch_size, beam_size, vocab_size])
-    if outputs.get_shape().ndims == 2:
-      logits_src = tf.reshape(logits_src, [-1, vocab_size])
-    elif outputs.get_shape().ndims == 1:
-      logits_src = tf.reshape(logits_src, [-1])
     logits = switches*logits_fix + (1-switches)*logits_src
+    if outputs.get_shape().ndims == 2:
+      logits = tf.reshape(logits, [-1, vocab_size])
+    elif outputs.get_shape().ndims == 1:
+      logits = tf.reshape(logits, [-1])
     return logits
   return logit_fn
