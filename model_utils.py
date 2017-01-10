@@ -165,7 +165,9 @@ def ResDNN(inputs,
       inputs = activation_fn(outputs)
       with tf.variable_scope("layer{0}".format(i+1)):
         outputs += fully_connected(inputs, out_size, decay=decay, activation_fn=None, is_training=is_training)
-  return outputs
+    if is_training:
+      outputs = tf.nn.dropout(outputs, 0.8)
+    return outputs
 
 # ResCNN
 def ResCNN(inputs, 
@@ -198,6 +200,8 @@ def ResCNN(inputs,
         inputs = activation_fn(outputs)
         outputs += convolution2d(inputs, out_size, kernel_size, decay=decay, activation_fn=None, 
             is_training=is_training)
+    if is_training:
+      outputs = tf.nn.dropout(outputs, 0.8)
     return outputs
 
 
@@ -252,9 +256,9 @@ class newGRUCell(tf.nn.rnn_cell.RNNCell):
   def output_size(self):
     return self._num_units
 
-  def __call__(self, inputs, state, scope="newGRUCell"):
+  def __call__(self, inputs, state, scope=None):
     """Gated recurrent unit (GRU) with nunits cells."""
-    with tf.variable_scope(scope,
+    with tf.variable_scope(scope or "newGRUCell",
                            None,
                            [inputs, state],
                            reuse=None):  # "GRUCell"
@@ -406,6 +410,8 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
   # stack multiple cells
   if num_layers > 1:
     cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers, state_is_tuple=True)
+  if is_training:
+    cell = tf.nn.rnn_cell.DropoutWrapper(cell, output_keep_prob=0.8)
   return cell
 
 
@@ -640,7 +646,7 @@ def attention_iter(inputs,
 
 ### Copy Mechanism ###
 
-def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True):
+def make_logit_fn_old(char_embedding, source_embedding, source_ids, is_training=True):
   def logit_fn(outputs):
     batch_size = tf.shape(source_embedding)[0]
     length = source_embedding.get_shape()[1].value
@@ -672,3 +678,36 @@ def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True
     logits = switches*logits_static + (1-switches)*logits_src
     return logits
   return logit_fn
+
+def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True):
+  def logit_fn(outputs):
+    batch_size = tf.shape(source_embedding)[0]
+    length = source_embedding.get_shape()[1].value
+    size = outputs.get_shape()[-1].value
+    vocab_size = char_embedding.get_shape()[0].value
+    if outputs.get_shape().ndims == 3:
+      beam_size = outputs.get_shape()[1].value
+      logits_static = tf.reshape(tf.matmul(tf.reshape(outputs, [-1, size]), tf.transpose(char_embedding)), 
+          [batch_size, beam_size, vocab_size])
+      logits_ptr = tf.batch_matmul(outputs, tf.transpose(source_embedding, [0, 2, 1]))
+    else:
+      assert(outputs.get_shape().ndims == 2)
+      logits_static = tf.reshape(tf.matmul(outputs, tf.transpose(char_embedding)), [batch_size, -1, vocab_size])
+      logits_ptr = tf.batch_matmul(tf.reshape(outputs, [batch_size, -1, size]),
+          tf.transpose(source_embedding, [0, 2, 1]))
+      beam_size = tf.shape(logits_ptr)[1]
+    logits = tf.concat(2, [logits_static, logits_ptr])
+    probs = tf.nn.softmax(logits)
+    probs_static = tf.slice(probs, [0, 0, 0], [-1, -1, vocab_size])
+    probs_ptr = tf.slice(probs, [0, 0, vocab_size], [-1, -1, -1])
+    data = tf.reshape(probs_ptr, [-1])
+    indices = tf.reshape(tf.reshape(tf.tile(tf.expand_dims(source_ids, 1), [1, beam_size, 1]),
+        [-1, length]) + tf.expand_dims(tf.range(batch_size*beam_size) * vocab_size, 1), [-1])
+    probs_src = tf.reshape(tf.unsorted_segment_sum(data, indices, batch_size*beam_size*vocab_size),
+        [batch_size, beam_size, vocab_size])
+    probs = probs_static + probs_src
+    if outputs.get_shape().ndims == 2:
+      probs = tf.reshape(probs, [-1, vocab_size])
+    return tf.log(probs+1e-10)
+  return logit_fn
+
