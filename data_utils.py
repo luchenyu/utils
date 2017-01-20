@@ -60,7 +60,7 @@ def sentence_to_token_ids(text, vocab):
      token_ids are one-based
   """
   text = text.strip()
-  seq = [vocab.key2idx(key.encode('utf-8')) for key in list(text.decode('utf-8'))]
+  seq = [vocab.key2idx(key.encode('utf8')) for key in list(text.decode('utf8'))]
   seq = [idx+1 if idx else vocab.key2idx("_UNK")+1 for idx in seq]
   return seq
 
