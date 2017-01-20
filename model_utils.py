@@ -504,7 +504,7 @@ def beam_dec(length,
              memory=None,
              num_candidates=1,
              beam_size=100,
-             gamma=0.0):
+             gamma=0.65):
   """ A basic beam decoder
 
   """
@@ -595,7 +595,7 @@ def stochastic_beam_dec(length,
                         memory=None,
                         num_candidates=1,
                         beam_size=100,
-                        gamma=0.0):
+                        gamma=0.65):
   """ A stochastic beam decoder
 
   """
