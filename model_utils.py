@@ -24,12 +24,12 @@ def fully_connected(inputs,
                          [inputs],
                          reuse=reuse) as sc:
     dtype = inputs.dtype.base_dtype
-    num_input_units = tf.contrib.layers.utils.last_dimension(inputs.get_shape(), min_rank=2)
+    num_input_units = inputs.get_shape()[-1].value
 
     static_shape = inputs.get_shape().as_list()
     static_shape[-1] = num_outputs
 
-    out_shape = tf.unpack(tf.shape(inputs))
+    out_shape = tf.unstack(tf.shape(inputs))
     out_shape[-1] = num_outputs
 
     weights_shape = [num_input_units, num_outputs]
@@ -42,7 +42,7 @@ def fully_connected(inputs,
     biases = tf.contrib.framework.model_variable('biases', 
                                                  shape=[num_outputs,], 
                                                  dtype=dtype, 
-                                                 initializer=tf.zeros_initializer, 
+                                                 initializer=tf.zeros_initializer(), 
                                                  collections=tf.GraphKeys.BIASES, 
                                                  trainable=True)
     if len(static_shape) > 2:
@@ -52,7 +52,7 @@ def fully_connected(inputs,
     moving_mean = tf.contrib.framework.model_variable('moving_mean', 
                                                       shape=[num_outputs,], 
                                                       dtype=dtype, 
-                                                      initializer=tf.zeros_initializer, 
+                                                      initializer=tf.zeros_initializer(), 
                                                       trainable=False)
     if is_training:
       # Calculate the moments based on the individual batch.
@@ -67,7 +67,7 @@ def fully_connected(inputs,
       outputs = activation_fn(outputs)
     if len(static_shape) > 2:
       # Reshape back outputs
-      outputs = tf.reshape(outputs, tf.pack(out_shape))
+      outputs = tf.reshape(outputs, tf.stack(out_shape))
       outputs.set_shape(static_shape)
     return outputs
 
@@ -89,25 +89,25 @@ def convolution2d(inputs,
                             [inputs],
                             reuse=reuse) as sc:
     dtype = inputs.dtype.base_dtype
-    num_filters_in = tf.contrib.layers.utils.last_dimension(inputs.get_shape(), min_rank=4)
+    num_filters_in = inputs.get_shape()[-1].value
     weights_shape = list(kernel_size) + [num_filters_in, num_outputs]
-    weights = tf.contrib.framework.model_variable('weights', 
+    weights = tf.contrib.framework.model_variable(name='weights', 
                                                   shape=weights_shape, 
-                                                  dtype=dtype, 
+                                                  dtype=dtype,
                                                   initializer=tf.contrib.layers.xavier_initializer(),
                                                   collections=tf.GraphKeys.WEIGHTS,
                                                   trainable=True)
-    biases = tf.contrib.framework.model_variable('biases',
+    biases = tf.contrib.framework.model_variable(name='biases',
                                                  shape=[num_outputs,],
                                                  dtype=dtype,
-                                                 initializer=tf.zeros_initializer,
+                                                 initializer=tf.zeros_initializer(),
                                                  collections=tf.GraphKeys.BIASES,
                                                  trainable=True)
     outputs = tf.nn.conv2d(inputs, weights, [1,1,1,1], padding='SAME')
     moving_mean = tf.contrib.framework.model_variable('moving_mean',
                                                       shape=[num_outputs,],
                                                       dtype=dtype,
-                                                      initializer=tf.zeros_initializer,
+                                                      initializer=tf.zeros_initializer(),
                                                       trainable=False)
     if is_training:
       # Calculate the moments based on the individual batch.
@@ -206,7 +206,7 @@ def ResCNN(inputs,
 
 
 ### RNN ###
-class GRUCell(tf.nn.rnn_cell.RNNCell):
+class GRUCell(tf.contrib.rnn.RNNCell):
   """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
 
   def __init__(self, num_units, input_size=None, activation=tf.tanh, linear=fully_connected):
@@ -229,16 +229,16 @@ class GRUCell(tf.nn.rnn_cell.RNNCell):
     with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
       with tf.variable_scope("Gates"):  # Reset gate and update gate.
         # We start with bias of 1.0 to not reset and not update.
-        r, u = tf.split(1, 2, self._linear(tf.concat(1, [inputs, state]),
+        r, u = tf.split(1, 2, self._linear(tf.concat([inputs, state], 1),
                                              2 * self._num_units))
         r, u = tf.sigmoid(r), tf.sigmoid(u)
       with tf.variable_scope("Candidate"):
-        c = self._activation(self._linear(tf.concat(1, [inputs, r * state]),
+        c = self._activation(self._linear(tf.concat([inputs, r * state], 1),
                                      self._num_units))
       new_h = u * state + (1 - u) * c
     return new_h, new_h
 
-class newGRUCell(tf.nn.rnn_cell.RNNCell):
+class newGRUCell(tf.contrib.rnn.RNNCell):
   """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
 
   def __init__(self, num_units, input_size=None, activation=tf.nn.relu, linear=fully_connected):
@@ -267,14 +267,14 @@ class newGRUCell(tf.nn.rnn_cell.RNNCell):
         i = tf.sigmoid(i)
       with tf.variable_scope("ForgetGatesAndUpdates"):
         x = self._linear(inputs, 2 * self._num_units)
-        c, f = tf.split(1, 2, x)
+        c, f = tf.split(x, 2, 1)
         c = self._activation(c)
         f = tf.sigmoid(f)
         update = state + i * c
         new_h = f * update
     return update - new_h, new_h
 
-class LayerNormFastWeightsBasicRNNCell(tf.nn.rnn_cell.RNNCell):
+class LayerNormFastWeightsBasicRNNCell(tf.contrib.rnn.RNNCell):
 
   def __init__(self, num_units, forget_bias=1.0, reuse_norm=False,
                input_size=None, activation=tf.nn.relu,
@@ -343,7 +343,7 @@ class LayerNormFastWeightsBasicRNNCell(tf.nn.rnn_cell.RNNCell):
     state_size = self.state_size
 
     zeros = tf.zeros(
-        tf.pack([batch_size, state_size, state_size]), dtype=dtype)
+        tf.stack([batch_size, state_size, state_size]), dtype=dtype)
     zeros.set_shape([None, state_size, state_size])
 
     return zeros
@@ -376,21 +376,21 @@ class LayerNormFastWeightsBasicRNNCell(tf.nn.rnn_cell.RNNCell):
         """
         if not self._reuse_norm:
           h = self._activation(self._norm(linear +
-                                          tf.batch_matmul(fast_weights, h), scope="Norm%d" % (i + 1)))
+                                          tf.matmul(fast_weights, h), scope="Norm%d" % (i + 1)))
         else:
           h = self._activation(self._norm(linear +
-                                          tf.batch_matmul(fast_weights, h)))
+                                          tf.matmul(fast_weights, h)))
 
       """
       Compute A(t+1)  according to Eqn (4)
       """
       state = self._vector2matrix(state)
-      new_fast_weights = self._lambda * fast_weights + self._eta * tf.batch_matmul(state, state, adj_y=True)
+      new_fast_weights = self._lambda * fast_weights + self._eta * tf.matmul(state, state, adj_y=True)
 
       h = self._matrix2vector(h)
       new_fast_weights = tf.reshape(new_fast_weights, [-1, self._num_units*self._num_units])
 
-      return h, tf.concat(1, [new_fast_weights, h])
+      return h, tf.concat([new_fast_weights, h], 1)
 
 def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=True):
   # fully connected layers inside the rnn cell
@@ -411,7 +411,7 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
   if num_layers > 1:
     cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers, state_is_tuple=True)
   if is_training:
-    cell = tf.nn.rnn_cell.DropoutWrapper(cell, output_keep_prob=0.8)
+    cell = tf.contrib.rnn.DropoutWrapper(cell, output_keep_prob=0.8)
   return cell
 
 
@@ -447,12 +447,12 @@ def greedy_dec(length,
     logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
 
     symbol = tf.argmax(logits, 1)
-    symbol = tf.select(mask, symbol, tf.zeros([batch_size], dtype=tf.int64))
+    symbol = tf.where(mask, symbol, tf.zeros([batch_size], dtype=tf.int64))
     mask = tf.not_equal(symbol, 0)
 
     seq.append(symbol)
 
-  return tf.expand_dims(tf.pack(seq, 1), 1)
+  return tf.expand_dims(tf.stack(seq, 1), 1)
 
 def stochastic_dec(length,
                    initial_state,
@@ -477,10 +477,10 @@ def stochastic_dec(length,
   seq = [symbol]
   tf.get_variable_scope().reuse_variables()
   if isinstance(state, tuple):
-    state = tuple([tf.reshape(tf.pack([s]*num_candidates, axis=1), 
+    state = tuple([tf.reshape(tf.stack([s]*num_candidates, axis=1), 
         [batch_size*num_candidates, s.get_shape()[1].value]) for s in state])
   else:
-    state = tf.reshape(tf.pack([state]*num_candidates, axis=1), 
+    state = tf.reshape(tf.stack([state]*num_candidates, axis=1), 
         [batch_size*num_candidates, state.get_shape()[1].value])
 
   for _ in xrange(length-1):
@@ -495,7 +495,7 @@ def stochastic_dec(length,
     mask = tf.equal(symbol, 0)
     seq.append(symbol)
 
-  return tf.reshape(tf.pack(seq, 1), [batch_size, num_candidates, length])
+  return tf.reshape(tf.stack(seq, 1), [batch_size, num_candidates, length])
 
 # beam decoder
 def beam_dec(length,
@@ -577,11 +577,11 @@ def beam_dec(length,
     beam_parent = indices // (vocab_size - 1)
     beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size) * beam_size, 1) + beam_parent, [-1])
     paths = tf.gather(paths, beam_parent)
-    paths = tf.concat(1, [paths, tf.reshape(symbols, [-1, 1])])
+    paths = tf.concat([paths, tf.reshape(symbols, [-1, 1])], 1)
 
   # pick the topk from the candidates in the lists
-  candidates = tf.reshape(tf.concat(1, candidates), [-1, length])
-  scores = tf.concat(1, scores)
+  candidates = tf.reshape(tf.concat(candidates, 1), [-1, length])
+  scores = tf.concat(scores, 1)
   best_scores, indices = tf.nn.top_k(scores, num_candidates)
   indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices, [-1])
   best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
@@ -668,11 +668,11 @@ def stochastic_beam_dec(length,
     beam_parent = indices // (vocab_size - 1)
     beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size) * beam_size, 1) + beam_parent, [-1])
     paths = tf.gather(paths, beam_parent)
-    paths = tf.concat(1, [paths, tf.reshape(symbols, [-1, 1])])
+    paths = tf.concat([paths, tf.reshape(symbols, [-1, 1])], 1)
 
   # pick the topk from the candidates in the lists
-  candidates = tf.reshape(tf.concat(1, candidates), [-1, length])
-  scores = tf.concat(1, scores)
+  candidates = tf.reshape(tf.concat(candidates, 1), [-1, length])
+  scores = tf.concat(scores, 1)
   indices = tf.to_int32(tf.multinomial(scores*10, num_candidates))
   indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices, [-1])
   best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
@@ -727,7 +727,7 @@ def attention_iter(inputs,
   with tf.variable_scope("attention_decoder", reuse=reuse):
 
     with tf.variable_scope("dec_cell"):
-      cell_outputs, cell_state = cell(tf.concat(1, [inputs, attn_feat]), cell_state)
+      cell_outputs, cell_state = cell(tf.concat([inputs, attn_feat], 1), cell_state)
 
     with tf.variable_scope("query"):
       query = fully_connected(cell_outputs, mem_size, 
@@ -737,7 +737,7 @@ def attention_iter(inputs,
       attn_feat = attention(query, keys, values, patch, is_training)
 
     with tf.variable_scope("output_proj"):
-      outputs = ResDNN(tf.concat(1, [cell_outputs, attn_feat]), size, 2, 
+      outputs = ResDNN(tf.concat([cell_outputs, attn_feat], 1), size, 2, 
           is_training=is_training)
 
     cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
@@ -757,11 +757,11 @@ def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True
       beam_size = outputs.get_shape()[1].value
       logits_static = tf.reshape(tf.matmul(tf.reshape(outputs, [-1, size]), tf.transpose(char_embedding)), 
           [batch_size, beam_size, vocab_size])
-      logits_ptr = tf.batch_matmul(outputs, tf.transpose(source_embedding, [0, 2, 1]))
+      logits_ptr = tf.matmul(outputs, tf.transpose(source_embedding, [0, 2, 1]))
     else:
       assert(outputs.get_shape().ndims == 2)
       logits_static = tf.reshape(tf.matmul(outputs, tf.transpose(char_embedding)), [batch_size, -1, vocab_size])
-      logits_ptr = tf.batch_matmul(tf.reshape(outputs, [batch_size, -1, size]),
+      logits_ptr = tf.matmul(tf.reshape(outputs, [batch_size, -1, size]),
           tf.transpose(source_embedding, [0, 2, 1]))
       beam_size = tf.shape(logits_ptr)[1]
     data = tf.reshape(logits_ptr, [-1])
@@ -769,7 +769,7 @@ def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True
         [-1, length]) + tf.expand_dims(tf.range(batch_size*beam_size) * vocab_size, 1), [-1])
     logits_src = tf.reshape(tf.unsorted_segment_sum(data, indices, batch_size*beam_size*vocab_size),
         [batch_size, beam_size, vocab_size])
-    logits_src = tf.concat(2, [tf.zeros([batch_size, beam_size, 1]), tf.slice(logits_src, [0, 0, 1], [-1, -1, -1])])
+    logits_src = tf.concat([tf.zeros([batch_size, beam_size, 1]), tf.slice(logits_src, [0, 0, 1], [-1, -1, -1])], 2)
     logits = logits_static + logits_src
     if outputs.get_shape().ndims == 2:
       logits = tf.reshape(logits, [-1, vocab_size])
