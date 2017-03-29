@@ -491,7 +491,7 @@ def stochastic_dec(length,
     logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
 
     symbol = tf.squeeze(tf.multinomial(logits, 1), [1])
-    symbol = tf.select(mask, tf.to_int64(tf.zeros([batch_size*num_candidates])), symbol)
+    symbol = tf.where(mask, tf.to_int64(tf.zeros([batch_size*num_candidates])), symbol)
     mask = tf.equal(symbol, 0)
     seq.append(symbol)
 
@@ -673,7 +673,7 @@ def stochastic_beam_dec(length,
   # pick the topk from the candidates in the lists
   candidates = tf.reshape(tf.concat(candidates, 1), [-1, length])
   scores = tf.concat(scores, 1)
-  indices = tf.to_int32(tf.multinomial(scores*10, num_candidates))
+  indices = tf.to_int32(tf.multinomial(scores*5, num_candidates))
   indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices, [-1])
   best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
   best_scores = tf.reshape(tf.gather(tf.reshape(scores, [-1]), indices), [batch_size, num_candidates])
