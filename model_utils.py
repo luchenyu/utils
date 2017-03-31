@@ -399,6 +399,8 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
  
   # build single cell
   if cell_type == "GRU":
+    single_cell = tf.contrib.rnn.GRUCell(size)
+  elif cell_type == "newGRU":
     single_cell = newGRUCell(size, activation=tf.tanh, linear=_linear)
   elif cell_type == "LSTM":
     single_cell = tf.nn.rnn_cell.LSTMCell(size, use_peepholes=True, cell_clip=5.0, num_proj=size)
@@ -409,7 +411,7 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
   cell = single_cell
   # stack multiple cells
   if num_layers > 1:
-    cell = tf.nn.rnn_cell.MultiRNNCell([single_cell] * num_layers, state_is_tuple=True)
+    cell = tf.contrib.rnn.MultiRNNCell([single_cell] * num_layers, state_is_tuple=True)
   if is_training:
     cell = tf.contrib.rnn.DropoutWrapper(cell, output_keep_prob=0.8)
   return cell
@@ -558,7 +560,7 @@ def beam_dec(length,
     inputs = tf.reshape(tf.nn.embedding_lookup(input_embedding, symbols), [-1, inputs_size])
 
     # iter
-    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, initial_state)
+    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, state)
     logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
 
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
@@ -635,6 +637,7 @@ def stochastic_beam_dec(length,
     memory = tf.reshape(tf.tile(memory, [1] + [beam_size] + [1]*(len(mdim)-1)),
         [-1]+mdim[1:])
 
+  mask = tf.expand_dims(tf.nn.in_top_k(prev, tf.zeros([batch_size], dtype=tf.int32), beam_size), 1)
   candidates = [tf.to_int32(tf.zeros([batch_size, 1, length]))]
   scores = [tf.slice(prev, [0, 0], [-1, 1])]
 
@@ -649,13 +652,15 @@ def stochastic_beam_dec(length,
     inputs = tf.reshape(tf.nn.embedding_lookup(input_embedding, symbols), [-1, inputs_size])
 
     # iter
-    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, initial_state)
+    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, state)
     logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
 
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
     prev += tf.expand_dims(best_probs, 2)
 
     # add the path and score of the candidates in the current beam to the lists
+    mask = tf.concat([mask, tf.reshape(tf.nn.in_top_k(tf.reshape(prev, [-1, vocab_size]), 
+        tf.zeros([batch_size*beam_size], dtype=tf.int32), beam_size), [batch_size, beam_size])], 1)
     close_score = tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2]) / (float(i+2) ** gamma)
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
@@ -673,7 +678,9 @@ def stochastic_beam_dec(length,
   # pick the topk from the candidates in the lists
   candidates = tf.reshape(tf.concat(candidates, 1), [-1, length])
   scores = tf.concat(scores, 1)
-  indices = tf.to_int32(tf.multinomial(scores*5, num_candidates))
+  fillers = tf.tile(tf.expand_dims(tf.reduce_min(scores, 1) - 20.0, 1), [1, tf.shape(scores)[1]])
+  scores = tf.where(mask, scores, fillers)
+  indices = tf.to_int32(tf.multinomial(scores * (12**gamma), num_candidates))
   indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices, [-1])
   best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
   best_scores = tf.reshape(tf.gather(tf.reshape(scores, [-1]), indices), [batch_size, num_candidates])
