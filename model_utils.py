@@ -692,7 +692,7 @@ def stochastic_beam_dec(length,
 def attention(query,
               keys,
               values,
-              patch=None,
+              mask=None,
               is_training=True):
   """ implements the attention mechanism
 
@@ -703,7 +703,10 @@ def attention(query,
   query = tf.expand_dims(query, 1)
   logits = convolution2d(tf.expand_dims(tf.tanh(query+keys), 1), 1, [1, 1], 
       is_training=is_training, scope="attention")
-  logits = tf.squeeze(logits, [1, 3]) + patch if patch != None else tf.squeeze(logits, [1, 3])
+  logits = tf.squeeze(logits, [1, 3])
+  if mask != None:
+    fillers = tf.tile(tf.expand_dims(tf.reduce_min(logits, 1) - 20.0, 1), [1, tf.shape(logits)[1]])
+    logits = tf.where(mask, logits, fillers)
   results = tf.reduce_sum(tf.expand_dims(tf.nn.softmax(logits), 2) * values, [1])
   return results
 
@@ -718,9 +721,9 @@ def attention_iter(inputs,
   """
   if len(memory) == 2:
     keys, values = memory
-    patch = None
+    mask = None
   elif len(memory) == 3:
-    keys, values, patch = memory
+    keys, values, mask = memory
   if not values.get_shape()[1:2].is_fully_defined():
     raise ValueError("Shape[1] and [2] of attention_states must be known: %s"
                      % values.get_shape())
@@ -741,7 +744,7 @@ def attention_iter(inputs,
           activation_fn=None, is_training=is_training)
 
     with tf.variable_scope("attention"):
-      attn_feat = attention(query, keys, values, patch, is_training)
+      attn_feat = attention(query, keys, values, mask, is_training)
 
     with tf.variable_scope("output_proj"):
       outputs = ResDNN(tf.concat([cell_outputs, attn_feat], 1), size, 2, 
