@@ -229,8 +229,8 @@ class GRUCell(tf.contrib.rnn.RNNCell):
     with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
       with tf.variable_scope("Gates"):  # Reset gate and update gate.
         # We start with bias of 1.0 to not reset and not update.
-        r, u = tf.split(1, 2, self._linear(tf.concat([inputs, state], 1),
-                                             2 * self._num_units))
+        r, u = tf.split(self._linear(tf.concat([inputs, state], 1),
+                                             2 * self._num_units), 2, 1)
         r, u = tf.sigmoid(r), tf.sigmoid(u)
       with tf.variable_scope("Candidate"):
         c = self._activation(self._linear(tf.concat([inputs, r * state], 1),
@@ -399,7 +399,7 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
  
   # build single cell
   if cell_type == "GRU":
-    single_cell = tf.contrib.rnn.GRUCell(size)
+    single_cell = GRUCell(size, activation=tf.tanh, linear=_linear)
   elif cell_type == "newGRU":
     single_cell = newGRUCell(size, activation=tf.tanh, linear=_linear)
   elif cell_type == "LSTM":
