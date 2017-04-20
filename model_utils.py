@@ -701,9 +701,9 @@ def attention(query,
   values: [batch_size x length x dim]
   """
   query = tf.expand_dims(query, 1)
-  logits = convolution2d(tf.expand_dims(tf.tanh(query+keys), 1), 1, [1, 1], 
+  logits = fully_connected(tf.tanh(query+keys), 1,
       is_training=is_training, scope="attention")
-  logits = tf.squeeze(logits, [1, 3])
+  logits = tf.squeeze(logits, [2])
   if mask != None:
     fillers = tf.tile(tf.expand_dims(tf.reduce_min(logits, 1) - 20.0, 1), [1, tf.shape(logits)[1]])
     logits = tf.where(mask, logits, fillers)
