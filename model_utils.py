@@ -564,14 +564,14 @@ def beam_dec(length,
     logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
 
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
-    prev += tf.expand_dims(best_probs, 2)
 
     # add the path and score of the candidates in the current beam to the lists
-    close_score = tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2]) / (float(i+2) ** gamma)
+    close_score = best_probs / (float(i+1) ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
     scores.append(close_score)
 
+    prev += tf.expand_dims(best_probs, 2)
     probs = tf.reshape(tf.slice(prev, [0, 0, 1], [-1, -1, -1]), [batch_size, -1])
     best_probs, indices = tf.nn.top_k(probs, beam_size)
 
@@ -656,16 +656,16 @@ def stochastic_beam_dec(length,
     logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
 
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
-    prev += tf.expand_dims(best_probs, 2)
 
     # add the path and score of the candidates in the current beam to the lists
     mask = tf.concat([mask, tf.reshape(tf.nn.in_top_k(tf.reshape(prev, [-1, vocab_size]), 
         tf.zeros([batch_size*beam_size], dtype=tf.int32), beam_size), [batch_size, beam_size])], 1)
-    close_score = tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2]) / (float(i+2) ** gamma)
+    close_score = best_probs / (float(i+1) ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
     scores.append(close_score)
 
+    prev += tf.expand_dims(best_probs, 2)
     probs = tf.reshape(tf.slice(prev, [0, 0, 1], [-1, -1, -1]), [batch_size, -1])
     best_probs, indices = tf.nn.top_k(probs, beam_size)
 
