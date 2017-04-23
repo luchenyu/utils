@@ -518,6 +518,7 @@ def beam_dec(length,
   inputs_size = input_embedding.get_shape()[1].value
   inputs = tf.nn.embedding_lookup(input_embedding, tf.zeros([batch_size], dtype=tf.int32))
   vocab_size = tf.shape(input_embedding)[0]
+  bow_embedding = tf.concat([tf.zeros([1, vocab_size]), tf.eye(vocab_size)], 0)
 
   # iter
   outputs, state = iter_fn(inputs, initial_state, memory) if memory else iter_fn(inputs, initial_state)
@@ -566,7 +567,9 @@ def beam_dec(length,
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
 
     # add the path and score of the candidates in the current beam to the lists
-    close_score = best_probs / (float(i+1) ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
+    uniq_len = tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(tf.nn.embedding_lookup(bow_embedding, paths), axis=1),
+        0.0, 1.0), axis=1)
+    close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
     scores.append(close_score)
@@ -609,6 +612,7 @@ def stochastic_beam_dec(length,
   inputs_size = input_embedding.get_shape()[1].value
   inputs = tf.nn.embedding_lookup(input_embedding, tf.zeros([batch_size], dtype=tf.int32))
   vocab_size = tf.shape(input_embedding)[0]
+  bow_embedding = tf.concat([tf.zeros([1, vocab_size]), tf.eye(vocab_size)], 0)
 
   # iter
   outputs, state = iter_fn(inputs, initial_state, memory) if memory else iter_fn(inputs, initial_state)
@@ -660,7 +664,9 @@ def stochastic_beam_dec(length,
     # add the path and score of the candidates in the current beam to the lists
     mask = tf.concat([mask, tf.reshape(tf.nn.in_top_k(tf.reshape(prev, [-1, vocab_size]), 
         tf.zeros([batch_size*beam_size], dtype=tf.int32), beam_size), [batch_size, beam_size])], 1)
-    close_score = best_probs / (float(i+1) ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
+    uniq_len = tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(tf.nn.embedding_lookup(bow_embedding, paths), axis=1), 
+        0.0, 1.0), axis=1)
+    close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
     scores.append(close_score)
