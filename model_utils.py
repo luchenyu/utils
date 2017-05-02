@@ -567,8 +567,8 @@ def beam_dec(length,
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
 
     # add the path and score of the candidates in the current beam to the lists
-    uniq_len = tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(tf.nn.embedding_lookup(bow_embedding, paths), axis=1),
-        0.0, 1.0), axis=1)
+    uniq_len = tf.reshape(tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(
+        tf.nn.embedding_lookup(bow_embedding, paths), axis=1), 0.0, 1.0), axis=1), [batch_size, beam_size])
     close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
@@ -664,8 +664,8 @@ def stochastic_beam_dec(length,
     # add the path and score of the candidates in the current beam to the lists
     mask = tf.concat([mask, tf.reshape(tf.nn.in_top_k(tf.reshape(prev, [-1, vocab_size]), 
         tf.zeros([batch_size*beam_size], dtype=tf.int32), beam_size), [batch_size, beam_size])], 1)
-    uniq_len = tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(tf.nn.embedding_lookup(bow_embedding, paths), axis=1), 
-        0.0, 1.0), axis=1)
+    uniq_len = tf.reshape(tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(
+        tf.nn.embedding_lookup(bow_embedding, paths), axis=1), 0.0, 1.0), axis=1), [batch_size, beam_size])
     close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
@@ -720,6 +720,7 @@ def attention_iter(inputs,
                    state,
                    memory,
                    cell,
+                   attention_fn=attention,
                    is_training=True,
                    reuse=None):
   """ implements an attention iter function
@@ -738,7 +739,7 @@ def attention_iter(inputs,
   cell_state = state[1:] if len(state) > 2 else state[1]
   batch_size = tf.shape(inputs)[0]
   size = inputs.get_shape()[1].value
-  mem_size = values.get_shape()[2].value
+  mem_size = values.get_shape()[-1].value
 
   with tf.variable_scope("attention_decoder", reuse=reuse):
 
@@ -750,7 +751,7 @@ def attention_iter(inputs,
           activation_fn=None, is_training=is_training)
 
     with tf.variable_scope("attention"):
-      attn_feat = attention(query, keys, values, mask, is_training)
+      attn_feat = attention_fn(query, keys, values, mask, is_training)
 
     with tf.variable_scope("output_proj"):
       outputs = ResDNN(tf.concat([cell_outputs, attn_feat], 1), size, 2, 
