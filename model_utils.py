@@ -392,6 +392,56 @@ class LayerNormFastWeightsBasicRNNCell(tf.contrib.rnn.RNNCell):
 
       return h, tf.concat([new_fast_weights, h], 1)
 
+def attention(query,
+              keys,
+              values,
+              masks,
+              is_training=True):
+  """ implements the attention mechanism
+
+  query: [batch_size x dim]
+  keys: [batch_size x length x dim]
+  values: [batch_size x length x dim]
+  """
+  query = tf.expand_dims(query, 1)
+  logits = fully_connected(tf.tanh(query+keys), 1,
+      is_training=is_training, scope="attention")
+  logits = tf.squeeze(logits, [2])
+  fillers = tf.tile(tf.expand_dims(tf.reduce_min(logits, 1) - 20.0, 1), [1, tf.shape(logits)[1]])
+  logits = tf.where(masks, logits, fillers)
+  results = tf.reduce_sum(tf.expand_dims(tf.nn.softmax(logits), 2) * values, [1])
+  return results
+
+class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
+  """Wrapper for attention mechanism"""
+
+  def __init__(self, cell, attention_fn=attention, is_training=True):
+    self.cell = cell
+    self.attention_fn = attention_fn
+    self.is_training=is_training
+
+  def __call__(self, inputs, state, scope=None):
+    with tf.variable_scope(scope or type(self).__name__):
+      keys = state[0]
+      values = state[1]
+      masks = state[2]
+      if not values.get_shape()[1:2].is_fully_defined():
+        raise ValueError("Shape[1] and [2] of attention_states must be known: %s"
+                         % values.get_shape())
+      attn_feat = state[3]
+      cell_state = state[4:] if len(state) > 5 else state[4]
+      batch_size = tf.shape(inputs)[0]
+      size = inputs.get_shape()[1].value
+      attention_size = values.get_shape()[-1].value
+
+      cell_outputs, cell_state = self.cell(tf.concat([inputs, attn_feat], 1), cell_state)
+      query = ResDNN(cell_outputs, attention_size, 2, is_training=self.is_training, scope="query_proj")
+      attn_feat = self.attention_fn(query, keys, values, masks, is_training=self.is_training)
+      outputs = tf.concat([cell_outputs, attn_feat], 1)
+      cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
+      state = (keys, values, masks, attn_feat,) + cell_state
+    return outputs, state
+
 def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=True):
   # fully connected layers inside the rnn cell
   def _linear(inputs, num_outputs):
@@ -423,10 +473,8 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
 def greedy_dec(length,
                initial_state,
                input_embedding,
-               output_embedding,
-               iter_fn,
-               logit_fn=None,
-               memory=None):
+               cell,
+               logit_fn):
   """ A greedy decoder.
 
   """
@@ -434,8 +482,8 @@ def greedy_dec(length,
   inputs_size = input_embedding.get_shape()[1].value
   inputs = tf.nn.embedding_lookup(input_embedding, tf.zeros([batch_size], dtype=tf.int32))
 
-  outputs, state = iter_fn(inputs, initial_state, memory) if memory else iter_fn(inputs, initial_state)
-  logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+  outputs, state = cell(inputs, initial_state)
+  logits = logit_fn(outputs)
 
   symbol = tf.argmax(logits, 1)
   seq = [symbol]
@@ -445,8 +493,8 @@ def greedy_dec(length,
 
     inputs = tf.nn.embedding_lookup(input_embedding, symbol)
 
-    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, initial_state)
-    logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+    outputs, state = cell(inputs, state)
+    logits = logit_fn(outputs)
 
     symbol = tf.argmax(logits, 1)
     symbol = tf.where(mask, symbol, tf.zeros([batch_size], dtype=tf.int64))
@@ -459,20 +507,18 @@ def greedy_dec(length,
 def stochastic_dec(length,
                    initial_state,
                    input_embedding,
-                   output_embedding,
-                   iter_fn,
-                   logit_fn=None,
-                   memory=None,
+                   cell,
+                   logit_fn,
                    num_candidates=1):
   """ A stochastic decoder.
 
   """
   batch_size = tf.shape(initial_state[0])[0] if isinstance(initial_state, tuple) else tf.shape(initial_state)[0]
   inputs_size = input_embedding.get_shape()[1].value
-  inputs = tf.zeros([batch_size, inputs_size])
+  inputs = tf.nn.embedding_lookup(input_embedding, tf.zeros([batch_size], dtype=tf.int32))
 
-  outputs, state = iter_fn(inputs, initial_state, memory) if memory else iter_fn(inputs, initial_state)
-  logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+  outputs, state = cell(inputs, initial_state)
+  logits = logit_fn(outputs)
 
   symbol = tf.reshape(tf.multinomial(logits, num_candidates), [-1])
   mask = tf.equal(symbol, 0)
@@ -480,17 +526,17 @@ def stochastic_dec(length,
   tf.get_variable_scope().reuse_variables()
   if isinstance(state, tuple):
     state = tuple([tf.reshape(tf.stack([s]*num_candidates, axis=1), 
-        [batch_size*num_candidates, s.get_shape()[1].value]) for s in state])
+        [batch_size*num_candidates] + s.get_shape()[1:]) for s in state])
   else:
     state = tf.reshape(tf.stack([state]*num_candidates, axis=1), 
-        [batch_size*num_candidates, state.get_shape()[1].value])
+        [batch_size*num_candidates] + state.get_shape()[1:])
 
   for _ in xrange(length-1):
 
     inputs = tf.nn.embedding_lookup(input_embedding, symbol)
 
-    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, initial_state)
-    logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+    outputs, state = cell(inputs, state)
+    logits = logit_fn(outputs)
 
     symbol = tf.squeeze(tf.multinomial(logits, 1), [1])
     symbol = tf.where(mask, tf.to_int64(tf.zeros([batch_size*num_candidates])), symbol)
@@ -503,10 +549,8 @@ def stochastic_dec(length,
 def beam_dec(length,
              initial_state,
              input_embedding,
-             output_embedding,
-             iter_fn,
-             logit_fn=None,
-             memory=None,
+             cell,
+             logit_fn,
              num_candidates=1,
              beam_size=100,
              gamma=0.65):
@@ -518,11 +562,10 @@ def beam_dec(length,
   inputs_size = input_embedding.get_shape()[1].value
   inputs = tf.nn.embedding_lookup(input_embedding, tf.zeros([batch_size], dtype=tf.int32))
   vocab_size = tf.shape(input_embedding)[0]
-  bow_embedding = tf.concat([tf.zeros([1, vocab_size]), tf.eye(vocab_size)], 0)
 
   # iter
-  outputs, state = iter_fn(inputs, initial_state, memory) if memory else iter_fn(inputs, initial_state)
-  logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+  outputs, state = cell(inputs, initial_state)
+  logits = logit_fn(outputs)
 
   prev = tf.nn.log_softmax(logits)
   probs = tf.slice(prev, [0, 1], [-1, -1])
@@ -532,20 +575,6 @@ def beam_dec(length,
   beam_parent = indices // vocab_size
   beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size), 1) + beam_parent, [-1])
   paths = tf.reshape(symbols, [-1, 1])
-
-  if isinstance(memory, tuple):
-    memory_prime = []
-    for m in memory:
-      mdim = [d.value for d in m.get_shape()]
-      m = tf.expand_dims(m, 1)
-      memory_prime.append(tf.reshape(tf.tile(m, [1] + [beam_size] + [1]*(len(mdim)-1)),
-          [-1]+mdim[1:]))
-    memory = tuple(memory_prime)
-  elif memory != None:
-    mdim = [d.value for d in memory.get_shape()]
-    memory = tf.expand_dims(memory, 1)
-    memory = tf.reshape(tf.tile(memory, [1] + [beam_size] + [1]*(len(mdim)-1)),
-        [-1]+mdim[1:])
 
   candidates = [tf.to_int32(tf.zeros([batch_size, 1, length]))]
   scores = [tf.slice(prev, [0, 0], [-1, 1])]
@@ -561,14 +590,15 @@ def beam_dec(length,
     inputs = tf.reshape(tf.nn.embedding_lookup(input_embedding, symbols), [-1, inputs_size])
 
     # iter
-    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, state)
-    logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+    outputs, state = cell(inputs, state)
+    logits = logit_fn(outputs)
 
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
 
     # add the path and score of the candidates in the current beam to the lists
-    uniq_len = tf.reshape(tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(
-        tf.nn.embedding_lookup(bow_embedding, paths), axis=1), 0.0, 1.0), axis=1), [batch_size, beam_size])
+    fn = lambda seq: tf.size(tf.unique(seq)[0])
+    uniq_len = tf.reshape(tf.to_float(tf.map_fn(fn, paths, dtype=tf.int32, parallel_iterations=100000)),
+        [batch_size, beam_size])
     close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
@@ -597,10 +627,8 @@ def beam_dec(length,
 def stochastic_beam_dec(length,
                         initial_state,
                         input_embedding,
-                        output_embedding,
-                        iter_fn,
-                        logit_fn=None,
-                        memory=None,
+                        cell,
+                        logit_fn,
                         num_candidates=1,
                         beam_size=100,
                         gamma=0.65):
@@ -612,11 +640,10 @@ def stochastic_beam_dec(length,
   inputs_size = input_embedding.get_shape()[1].value
   inputs = tf.nn.embedding_lookup(input_embedding, tf.zeros([batch_size], dtype=tf.int32))
   vocab_size = tf.shape(input_embedding)[0]
-  bow_embedding = tf.concat([tf.zeros([1, vocab_size]), tf.eye(vocab_size)], 0)
 
   # iter
-  outputs, state = iter_fn(inputs, initial_state, memory) if memory else iter_fn(inputs, initial_state)
-  logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+  outputs, state = cell(inputs, initial_state)
+  logits = logit_fn(outputs)
 
   prev = tf.nn.log_softmax(logits)
   probs = tf.slice(prev, [0, 1], [-1, -1])
@@ -626,20 +653,6 @@ def stochastic_beam_dec(length,
   beam_parent = indices // vocab_size
   beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size), 1) + beam_parent, [-1])
   paths = tf.reshape(symbols, [-1, 1])
-
-  if isinstance(memory, tuple):
-    memory_prime = []
-    for m in memory:
-      mdim = [d.value for d in m.get_shape()]
-      m = tf.expand_dims(m, 1)
-      memory_prime.append(tf.reshape(tf.tile(m, [1] + [beam_size] + [1]*(len(mdim)-1)),
-          [-1]+mdim[1:]))
-    memory = tuple(memory_prime)
-  elif memory != None:
-    mdim = [d.value for d in memory.get_shape()]
-    memory = tf.expand_dims(memory, 1)
-    memory = tf.reshape(tf.tile(memory, [1] + [beam_size] + [1]*(len(mdim)-1)),
-        [-1]+mdim[1:])
 
   mask = tf.expand_dims(tf.nn.in_top_k(prev, tf.zeros([batch_size], dtype=tf.int32), beam_size), 1)
   candidates = [tf.to_int32(tf.zeros([batch_size, 1, length]))]
@@ -656,16 +669,17 @@ def stochastic_beam_dec(length,
     inputs = tf.reshape(tf.nn.embedding_lookup(input_embedding, symbols), [-1, inputs_size])
 
     # iter
-    outputs, state = iter_fn(inputs, state, memory) if memory else iter_fn(inputs, state)
-    logits = logit_fn(outputs) if logit_fn else tf.matmul(outputs, tf.transpose(output_embedding))
+    outputs, state = cell(inputs, state)
+    logits = logit_fn(outputs)
 
     prev = tf.reshape(tf.nn.log_softmax(logits), [batch_size, beam_size, vocab_size])
 
     # add the path and score of the candidates in the current beam to the lists
     mask = tf.concat([mask, tf.reshape(tf.nn.in_top_k(tf.reshape(prev, [-1, vocab_size]), 
         tf.zeros([batch_size*beam_size], dtype=tf.int32), beam_size), [batch_size, beam_size])], 1)
-    uniq_len = tf.reshape(tf.reduce_sum(tf.clip_by_value(tf.reduce_sum(
-        tf.nn.embedding_lookup(bow_embedding, paths), axis=1), 0.0, 1.0), axis=1), [batch_size, beam_size])
+    fn = lambda seq: tf.size(tf.unique(seq)[0])
+    uniq_len = tf.reshape(tf.to_float(tf.map_fn(fn, paths, dtype=tf.int32, parallel_iterations=100000)),
+        [batch_size, beam_size])
     close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
     candidates.append(tf.reshape(tf.pad(paths, [[0, 0], [0, length-1-i]], "CONSTANT"), 
         [batch_size, beam_size, length]))
@@ -686,110 +700,56 @@ def stochastic_beam_dec(length,
   scores = tf.concat(scores, 1)
   fillers = tf.tile(tf.expand_dims(tf.reduce_min(scores, 1) - 20.0, 1), [1, tf.shape(scores)[1]])
   scores = tf.where(mask, scores, fillers)
-  indices = tf.to_int32(tf.multinomial(scores * (12**gamma), num_candidates))
+  indices = tf.to_int32(tf.multinomial(scores * (7**gamma), num_candidates))
   indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices, [-1])
   best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
   best_scores = tf.reshape(tf.gather(tf.reshape(scores, [-1]), indices), [batch_size, num_candidates])
 
   return best_candidates, best_scores
 
-### Attention on Memory ###
-
-def attention(query,
-              keys,
-              values,
-              mask=None,
-              is_training=True):
-  """ implements the attention mechanism
-
-  query: [batch_size x dim]
-  keys: [batch_size x length x dim]
-  values: [batch_size x length x dim]
-  """
-  query = tf.expand_dims(query, 1)
-  logits = fully_connected(tf.tanh(query+keys), 1,
-      is_training=is_training, scope="attention")
-  logits = tf.squeeze(logits, [2])
-  if mask != None:
-    fillers = tf.tile(tf.expand_dims(tf.reduce_min(logits, 1) - 20.0, 1), [1, tf.shape(logits)[1]])
-    logits = tf.where(mask, logits, fillers)
-  results = tf.reduce_sum(tf.expand_dims(tf.nn.softmax(logits), 2) * values, [1])
-  return results
-
-def attention_iter(inputs,
-                   state,
-                   memory,
-                   cell,
-                   attention_fn=attention,
-                   is_training=True,
-                   reuse=None):
-  """ implements an attention iter function
-
-  """
-  if len(memory) == 2:
-    keys, values = memory
-    mask = None
-  elif len(memory) == 3:
-    keys, values, mask = memory
-  if not values.get_shape()[1:2].is_fully_defined():
-    raise ValueError("Shape[1] and [2] of attention_states must be known: %s"
-                     % values.get_shape())
-
-  attn_feat = state[0]
-  cell_state = state[1:] if len(state) > 2 else state[1]
-  batch_size = tf.shape(inputs)[0]
-  size = inputs.get_shape()[1].value
-  mem_size = values.get_shape()[-1].value
-
-  with tf.variable_scope("attention_decoder", reuse=reuse):
-
-    with tf.variable_scope("dec_cell"):
-      cell_outputs, cell_state = cell(tf.concat([inputs, attn_feat], 1), cell_state)
-
-    with tf.variable_scope("query"):
-      query = fully_connected(cell_outputs, mem_size, 
-          activation_fn=None, is_training=is_training)
-
-    with tf.variable_scope("attention"):
-      attn_feat = attention_fn(query, keys, values, mask, is_training)
-
-    with tf.variable_scope("output_proj"):
-      outputs = ResDNN(tf.concat([cell_outputs, attn_feat], 1), size, 2, 
-          is_training=is_training)
-
-    cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
-    state = (attn_feat,) + cell_state
-
-  return outputs, state
 
 ### Copy Mechanism ###
 
-def make_logit_fn(char_embedding, source_embedding, source_ids, is_training=True):
-  def logit_fn(outputs):
-    batch_size = tf.shape(source_embedding)[0]
-    length = source_embedding.get_shape()[1].value
-    size = outputs.get_shape()[-1].value
-    vocab_size = char_embedding.get_shape()[0].value
-    if outputs.get_shape().ndims == 3:
-      beam_size = outputs.get_shape()[1].value
-      logits_static = tf.reshape(tf.matmul(tf.reshape(outputs, [-1, size]), tf.transpose(char_embedding)), 
+def make_logit_fn(vocab_embedding, copy_embedding=None, copy_ids=None, is_training=True):
+  if copy_embedding == None or copy_ids == None:
+    def logit_fn(outputs):
+      outputs_vocab = ResDNN(outputs, size, 2, is_training=is_training, scope="proj_vocab")
+      logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_vocab, [-1, size]), tf.transpose(vocab_embedding)),
+          outputs.get_shape()[:-1]+[-1])
+      return logits_vocab
+  else:
+    def logit_fn(outputs):
+      batch_size = tf.shape(copy_embedding)[0]
+      length = copy_embedding.get_shape()[1].value
+      size = vocab_embedding.get_shape()[-1].value
+      vocab_size = vocab_embedding.get_shape()[0].value
+      outputs_vocab = ResDNN(outputs, size, 2, is_training=is_training, scope="proj_vocab")
+      outputs_copy = ResDNN(outputs, size, 2, is_training=is_training, scope="proj_copy")
+      if outputs.get_shape().ndims == 3:
+        beam_size = outputs.get_shape()[1].value
+        logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_vocab, [-1, size]), 
+            tf.transpose(vocab_embedding/(tf.norm(vocab_embedding, axis=1, keep_dims=True)+1e-20))), 
+            [batch_size, beam_size, vocab_size])
+        logits_copy = tf.matmul(outputs_copy, 
+            tf.transpose(copy_embedding/(tf.norm(copy_embedding, axis=2, keep_dims=True)+1e-20), [0, 2, 1]))
+      else:
+        assert(outputs.get_shape().ndims == 2)
+        logits_vocab = tf.reshape(tf.matmul(outputs_vocab, tf.transpose(vocab_embedding)), 
+            [batch_size, -1, vocab_size])
+        logits_copy = tf.matmul(tf.reshape(outputs_copy, [batch_size, -1, size]),
+            tf.transpose(copy_embedding, [0, 2, 1]))
+        beam_size = tf.shape(logits_copy)[1]
+      data = tf.reshape(logits_copy, [-1])
+      indices = tf.reshape(tf.reshape(tf.tile(tf.expand_dims(copy_ids, 1), [1, beam_size, 1]),
+          [-1, length]) + tf.expand_dims(tf.range(batch_size*beam_size) * vocab_size, 1), [-1])
+      logits_copy = tf.reshape(tf.unsorted_segment_sum(data, indices, batch_size*beam_size*vocab_size),
           [batch_size, beam_size, vocab_size])
-      logits_ptr = tf.matmul(outputs, tf.transpose(source_embedding, [0, 2, 1]))
-    else:
-      assert(outputs.get_shape().ndims == 2)
-      logits_static = tf.reshape(tf.matmul(outputs, tf.transpose(char_embedding)), [batch_size, -1, vocab_size])
-      logits_ptr = tf.matmul(tf.reshape(outputs, [batch_size, -1, size]),
-          tf.transpose(source_embedding, [0, 2, 1]))
-      beam_size = tf.shape(logits_ptr)[1]
-    data = tf.reshape(logits_ptr, [-1])
-    indices = tf.reshape(tf.reshape(tf.tile(tf.expand_dims(source_ids, 1), [1, beam_size, 1]),
-        [-1, length]) + tf.expand_dims(tf.range(batch_size*beam_size) * vocab_size, 1), [-1])
-    logits_src = tf.reshape(tf.unsorted_segment_sum(data, indices, batch_size*beam_size*vocab_size),
-        [batch_size, beam_size, vocab_size])
-    logits_src = tf.concat([tf.zeros([batch_size, beam_size, 1]), tf.slice(logits_src, [0, 0, 1], [-1, -1, -1])], 2)
-    logits = logits_static + logits_src
-    if outputs.get_shape().ndims == 2:
-      logits = tf.reshape(logits, [-1, vocab_size])
-    return logits
+      logits_copy = tf.concat([tf.zeros([batch_size, beam_size, 1]), 
+          tf.slice(logits_copy, [0, 0, 1], [-1, -1, -1])], 2)
+      logits = logits_vocab + logits_copy
+      if outputs.get_shape().ndims == 2:
+        logits = tf.reshape(logits, [-1, vocab_size])
+      return logits
   return logit_fn
+
 
