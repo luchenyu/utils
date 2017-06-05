@@ -714,7 +714,8 @@ def make_logit_fn(vocab_embedding, copy_embedding=None, copy_ids=None, is_traini
   if copy_embedding == None or copy_ids == None:
     def logit_fn(outputs):
       outputs_vocab = ResDNN(outputs, size, 2, is_training=is_training, scope="proj_vocab")
-      logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_vocab, [-1, size]), tf.transpose(vocab_embedding)),
+      logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_vocab, [-1, size]), 
+          tf.transpose(vocab_embedding/(tf.norm(vocab_embedding, axis=1, keep_dims=True)+1e-20))),
           outputs.get_shape()[:-1]+[-1])
       return logits_vocab
   else:
@@ -734,10 +735,11 @@ def make_logit_fn(vocab_embedding, copy_embedding=None, copy_ids=None, is_traini
             tf.transpose(copy_embedding/(tf.norm(copy_embedding, axis=2, keep_dims=True)+1e-20), [0, 2, 1]))
       else:
         assert(outputs.get_shape().ndims == 2)
-        logits_vocab = tf.reshape(tf.matmul(outputs_vocab, tf.transpose(vocab_embedding)), 
+        logits_vocab = tf.reshape(tf.matmul(outputs_vocab, 
+            tf.transpose(vocab_embedding/(tf.norm(vocab_embedding, axis=1, keep_dims=True)+1e-20))), 
             [batch_size, -1, vocab_size])
         logits_copy = tf.matmul(tf.reshape(outputs_copy, [batch_size, -1, size]),
-            tf.transpose(copy_embedding, [0, 2, 1]))
+            tf.transpose(copy_embedding/(tf.norm(copy_embedding, axis=2, keep_dims=True)+1e-20), [0, 2, 1]))
         beam_size = tf.shape(logits_copy)[1]
       data = tf.reshape(logits_copy, [-1])
       indices = tf.reshape(tf.reshape(tf.tile(tf.expand_dims(copy_ids, 1), [1, beam_size, 1]),
