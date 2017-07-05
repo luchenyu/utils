@@ -9,7 +9,7 @@ from tensorflow.python.util import nest
 # fully_connected layer
 def fully_connected(inputs,
                     num_outputs, 
-                    decay=0.99999, 
+                    decay=0.999, 
                     activation_fn=None, 
                     is_training=True, 
                     reuse=None, 
@@ -76,7 +76,7 @@ def convolution2d(inputs,
                   num_outputs, 
                   kernel_size, 
                   pool_size=None, 
-                  decay=0.99999, 
+                  decay=0.999, 
                   activation_fn=None, 
                   is_training=True, 
                   reuse=None, 
@@ -143,7 +143,6 @@ def params_decay(decay):
 
 # ResDNN
 def ResDNN(inputs, 
-           out_size, 
            num_layers, 
            decay=0.99999, 
            activation_fn=tf.nn.relu, 
@@ -154,27 +153,23 @@ def ResDNN(inputs,
 
   """
   with tf.variable_scope(scope,
-                            "ResDNN",
-                            [inputs],
-                            reuse=reuse):
-    # first layer
-    with tf.variable_scope("layer{0}".format(0)):
-      outputs = fully_connected(inputs, out_size, decay=decay, activation_fn=None, is_training=is_training)
+                         "ResDNN",
+                         [inputs],
+                         reuse=reuse) as sc:
+    size = inputs.get_shape()[-1].value
+    outputs = inputs
     # residual layers
-    for i in xrange(num_layers-1):
-      inputs = activation_fn(outputs)
-      with tf.variable_scope("layer{0}".format(i+1)):
-        outputs += fully_connected(inputs, out_size, decay=decay, activation_fn=None, is_training=is_training)
-    if is_training:
-      outputs = tf.nn.dropout(outputs, 0.8)
+    for i in xrange(num_layers):
+      outputs -= fully_connected(activation_fn(outputs), size, decay=decay, activation_fn=activation_fn, 
+          is_training=is_training)
     return outputs
 
 # ResCNN
-def ResCNN(inputs, 
-           out_size, 
+def ResCNN(inputs,
            num_layers, 
            kernel_size, 
-           pool_size, 
+           pool_size,
+           pool_layers=1,
            decay=0.99999, 
            activation_fn=tf.nn.relu, 
            is_training=True, 
@@ -186,22 +181,21 @@ def ResCNN(inputs,
   with tf.variable_scope(scope,
                          "ResCNN",
                          [inputs],
-                         reuse=reuse):
-    # first layer
-    with tf.variable_scope("layer{0}".format(0)):
-      outputs = convolution2d(inputs, out_size, kernel_size, decay=decay, activation_fn=None, 
-          is_training=is_training)
+                         reuse=reuse) as sc:
+    size = inputs.get_shape()[-1].value
+    if not pool_size:
+      pool_layers = 0
+    outputs = inputs
     # residual layers
-    for i in xrange(num_layers-1):
-      with tf.variable_scope("layer{0}".format(i+1)):
-        if pool_size:
-          pool_shape = [1] + list(pool_size) + [1]
-          outputs = tf.nn.max_pool(outputs, pool_shape, pool_shape, padding='SAME')
-        inputs = activation_fn(outputs)
-        outputs += convolution2d(inputs, out_size, kernel_size, decay=decay, activation_fn=None, 
-            is_training=is_training)
-    if is_training:
-      outputs = tf.nn.dropout(outputs, 0.8)
+    for j in xrange(pool_layers+1):
+      if j > 0:
+        pool_shape = [1] + list(pool_size) + [1]
+        inputs = tf.nn.max_pool(outputs, pool_shape, pool_shape, padding='SAME')
+        outputs = inputs
+      with tf.variable_scope("layer{0}".format(j)) as sc:
+        for i in xrange(num_layers):
+          outputs -= convolution2d(activation_fn(outputs), size, kernel_size, decay=decay,
+              activation_fn=activation_fn, is_training=is_training)
     return outputs
 
 
@@ -229,7 +223,7 @@ class GRUCell(tf.contrib.rnn.RNNCell):
     with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
       with tf.variable_scope("Gates"):  # Reset gate and update gate.
         # We start with bias of 1.0 to not reset and not update.
-        r, u = tf.split(self._linear(tf.concat([inputs, state], 1),
+        r, u = tf.split(fully_connected(tf.concat([inputs, state], 1),
                                              2 * self._num_units), 2, 1)
         r, u = tf.sigmoid(r), tf.sigmoid(u)
       with tf.variable_scope("Candidate"):
@@ -238,12 +232,10 @@ class GRUCell(tf.contrib.rnn.RNNCell):
       new_h = u * state + (1 - u) * c
     return new_h, new_h
 
-class newGRUCell(tf.contrib.rnn.RNNCell):
-  """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
+class RANCell(tf.contrib.rnn.RNNCell):
+  """Recurrent Additive Unit cell."""
 
-  def __init__(self, num_units, input_size=None, activation=tf.nn.relu, linear=fully_connected):
-    if input_size is not None:
-      logging.warn("%s: The input_size parameter is deprecated." % self)
+  def __init__(self, num_units, activation=tf.nn.relu, linear=fully_connected):
     self._num_units = num_units
     self._activation = activation
     self._linear = linear
@@ -257,140 +249,15 @@ class newGRUCell(tf.contrib.rnn.RNNCell):
     return self._num_units
 
   def __call__(self, inputs, state, scope=None):
-    """Gated recurrent unit (GRU) with nunits cells."""
-    with tf.variable_scope(scope or "newGRUCell",
-                           None,
-                           [inputs, state],
-                           reuse=None):  # "GRUCell"
-      with tf.variable_scope("InputGates"):
-        i = self._linear(state, self._num_units)
-        i = tf.sigmoid(i)
-      with tf.variable_scope("ForgetGatesAndUpdates"):
-        x = self._linear(inputs, 2 * self._num_units)
-        c, f = tf.split(x, 2, 1)
-        c = self._activation(c)
-        f = tf.sigmoid(f)
-        update = state + i * c
-        new_h = f * update
-    return update - new_h, new_h
+    with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
+      with tf.variable_scope("Gates"):  # Reset gate and update gate.
+        # We start with bias of 1.0 to not reset and not update.
+        i, f = tf.split(fully_connected(tf.concat([inputs, state], 1),
+                                             2 * self._num_units), 2, 1)
+        i, f = tf.sigmoid(i), tf.sigmoid(f)
+      new_h = f * state + i * inputs
+    return new_h, new_h
 
-class LayerNormFastWeightsBasicRNNCell(tf.contrib.rnn.RNNCell):
-
-  def __init__(self, num_units, forget_bias=1.0, reuse_norm=False,
-               input_size=None, activation=tf.nn.relu,
-               layer_norm=True, norm_gain=1.0, norm_shift=0.0,
-               loop_steps=1, decay_rate=0.9, learning_rate=0.5,
-               dropout_keep_prob=1.0, dropout_prob_seed=None):
-
-    if input_size is not None:
-      tf.logging.warn("%s: The input_size parameter is deprecated.", self)
-
-    self._num_units = num_units
-    self._activation = activation
-    self._forget_bias = forget_bias
-    self._reuse_norm = reuse_norm
-    self._keep_prob = dropout_keep_prob
-    self._seed = dropout_prob_seed
-    self._layer_norm = layer_norm
-    self._S = loop_steps
-    self._eta = learning_rate
-    self._lambda = decay_rate
-    self._g = norm_gain
-    self._b = norm_shift
-
-  @property
-  def state_size(self):
-    return self._num_units
-
-  @property
-  def output_size(self):
-    return self._num_units
-
-  def _norm(self, inp, scope=None):
-    reuse = tf.get_variable_scope().reuse
-    with tf.variable_scope(scope or "Norm") as scope:
-      normalized = tf.contrib.layers.layer_norm(inp, reuse=reuse, scope=scope)
-      return normalized
-
-  def _fwlinear(self, args, output_size, scope=None):
-    if args is None or (nest.is_sequence(args) and not args):
-      raise ValueError("`args` must be specified")
-    if not nest.is_sequence(args):
-      args = [args]
-    assert len(args) == 2
-    assert args[0].get_shape().as_list()[1] == output_size
-
-    dtype = [a.dtype for a in args][0]
-
-    with tf.variable_scope(scope or "Linear"):
-      matrixW = tf.get_variable(
-        "MatrixW", dtype=dtype, initializer=tf.convert_to_tensor(np.eye(output_size, dtype=np.float32) * .05))
-
-      matrixC = tf.get_variable(
-        "MatrixC", [args[1].get_shape().as_list()[1], output_size], dtype=dtype)
-
-      res = tf.matmul(args[0], matrixW) + tf.matmul(args[1], matrixC)
-      return res
-
-  def zero_fast_weights(self, batch_size, dtype):
-    """Return zero-filled fast_weights tensor(s).
-    Args:
-      batch_size: int, float, or unit Tensor representing the batch size.
-      dtype: the data type to use for the state.
-    Returns:
-      A zero filled fast_weights of shape [batch_size, state_size, state_size]
-    """
-    state_size = self.state_size
-
-    zeros = tf.zeros(
-        tf.stack([batch_size, state_size, state_size]), dtype=dtype)
-    zeros.set_shape([None, state_size, state_size])
-
-    return zeros
-
-  def _vector2matrix(self, vector):
-    memory_size = vector.get_shape().as_list()[1]
-    return tf.reshape(vector, [-1, memory_size, 1])
-
-  def _matrix2vector(self, matrix):
-    return tf.squeeze(matrix, [2])
-
-  def __call__(self, inputs, state, scope=None):
-    fast_weights = tf.slice(state, [0, 0], [-1, self._num_units*self._num_units])
-    fast_weights = tf.reshape(fast_weights, [-1, self._num_units, self._num_units])
-    state = tf.slice(state, [0, self._num_units*self._num_units], [-1, self._num_units])
-    with tf.variable_scope(scope or type(self).__name__) as scope:
-      """Compute Wh(t) + Cx(t)"""
-      linear = self._fwlinear([state, inputs], self._num_units, False)
-      """Compute h_0(t+1) = f(Wh(t) + Cx(t))"""
-      if not self._reuse_norm:
-        h = self._activation(self._norm(linear, scope="Norm0"))
-      else:
-        h = self._activation(self._norm(linear))
-      h = self._vector2matrix(h)
-      linear = self._vector2matrix(linear)
-      for i in range(self._S):
-        """
-        Compute h_{s+1}(t+1) = f([Wh(t) + Cx(t)] + A(t) h_s(t+1)), S times.
-        See Eqn (2) in the paper.
-        """
-        if not self._reuse_norm:
-          h = self._activation(self._norm(linear +
-                                          tf.matmul(fast_weights, h), scope="Norm%d" % (i + 1)))
-        else:
-          h = self._activation(self._norm(linear +
-                                          tf.matmul(fast_weights, h)))
-
-      """
-      Compute A(t+1)  according to Eqn (4)
-      """
-      state = self._vector2matrix(state)
-      new_fast_weights = self._lambda * fast_weights + self._eta * tf.matmul(state, state, adj_y=True)
-
-      h = self._matrix2vector(h)
-      new_fast_weights = tf.reshape(new_fast_weights, [-1, self._num_units*self._num_units])
-
-      return h, tf.concat([new_fast_weights, h], 1)
 
 def attention(query,
               keys,
@@ -415,43 +282,75 @@ def attention(query,
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
   """Wrapper for attention mechanism"""
 
-  def __init__(self, cell, attention_fn=attention, is_training=True):
+  def __init__(self, cell, num_attention=2, self_attention_idx=0, attention_fn=attention, is_training=True):
     self.cell = cell
+    self.num_attention = num_attention
+    self.self_attention_idx = self_attention_idx
     self.attention_fn = attention_fn
     self.is_training=is_training
 
   def __call__(self, inputs, state, scope=None):
     with tf.variable_scope(scope or type(self).__name__):
-      keys = state[0]
-      values = state[1]
-      masks = state[2]
-      if not values.get_shape()[1:2].is_fully_defined():
-        raise ValueError("Shape[1] and [2] of attention_states must be known: %s"
-                         % values.get_shape())
-      attn_feat = state[3]
-      cell_state = state[4:] if len(state) > 5 else state[4]
+      keys = []
+      values = []
+      masks = []
+      attn_feats = []
+      for _ in xrange(self.num_attention):
+        keys.append(state[0])
+        values.append(state[1])
+        masks.append(state[2])
+        attn_feats.append(state[3])
+        state = state[4:]
+      cell_state = state if len(state) > 1 else state[0]
       batch_size = tf.shape(inputs)[0]
-      size = inputs.get_shape()[1].value
-      attention_size = values.get_shape()[-1].value
+      input_size = inputs.get_shape()[1].value
 
-      cell_outputs, cell_state = self.cell(tf.concat([inputs, attn_feat], 1), cell_state)
-      query = ResDNN(cell_outputs, attention_size, 2, is_training=self.is_training, scope="query_proj")
-      attn_feat = self.attention_fn(query, keys, values, masks, is_training=self.is_training)
-      outputs = tf.concat([cell_outputs, attn_feat], 1)
+      cell_outputs, cell_state = self.cell(inputs, cell_state)
+      # update self attention
+      if self.self_attention_idx >= 0 and self.self_attention_idx < self.num_attention:
+        value_size = values[self.self_attention_idx].get_shape()[-1].value
+        key_size = keys[self.self_attention_idx].get_shape()[-1].value
+        new_value = cell_outputs
+        values[self.self_attention_idx] = tf.concat([values[self.self_attention_idx], 
+            tf.reshape(new_value, [batch_size, 1, value_size])], axis=1)
+        new_key = fully_connected(new_value, key_size, is_training=self.is_training, scope="key")
+        keys[self.self_attention_idx] = tf.concat([keys[self.self_attention_idx], 
+            tf.reshape(new_key, [batch_size, 1, key_size])], axis=1)
+        new_mask = tf.equal(tf.zeros([batch_size, 1]), 0.0)
+        masks[self.self_attention_idx] = tf.concat([masks[self.self_attention_idx], new_mask], axis=1)
+
+      # attend
+      for i in xrange(self.num_attention):
+        value_size = values[i].get_shape()[-1].value
+        key_size = keys[i].get_shape()[-1].value
+        query = fully_connected(tf.concat([cell_outputs, attn_feats[i]], axis=1), key_size, 
+            is_training=self.is_training, scope="query_proj"+str(i))
+        with tf.variable_scope("attention"+str(i)):
+          attn_feats[i] = self.attention_fn(query, keys[i], values[i], masks[i], is_training=self.is_training)
+      outputs = tf.concat([cell_outputs,] +  attn_feats, 1)
       cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
-      state = (keys, values, masks, attn_feat,) + cell_state
+      state = []
+      for i in xrange(self.num_attention):
+        state.extend([keys[i], values[i], masks[i], attn_feats[i]])
+      state = tuple(state) + cell_state
     return outputs, state
 
-def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=True):
+
+def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, activation_fn=tf.tanh, linear=None,
+    is_training=True):
+ 
   # fully connected layers inside the rnn cell
   def _linear(inputs, num_outputs):
     return fully_connected(inputs, num_outputs, decay=decay, is_training=is_training) 
- 
+
+  if not linear:
+    linear=_linear
+
   # build single cell
   if cell_type == "GRU":
-    single_cell = GRUCell(size, activation=tf.tanh, linear=_linear)
-  elif cell_type == "newGRU":
-    single_cell = newGRUCell(size, activation=tf.tanh, linear=_linear)
+    single_cell = GRUCell(size, activation=activation_fn, linear=linear)
+  elif cell_type == "RAN":
+    single_cell = RANCell(size, activation=activation_fn, linear=linear)
   elif cell_type == "LSTM":
     single_cell = tf.nn.rnn_cell.LSTMCell(size, use_peepholes=True, cell_clip=5.0, num_proj=size)
   elif cell_type == "FastWeight":
@@ -462,8 +361,6 @@ def create_cell(size, num_layers, cell_type="GRU", decay=0.99999, is_training=Tr
   # stack multiple cells
   if num_layers > 1:
     cell = tf.contrib.rnn.MultiRNNCell([single_cell] * num_layers, state_is_tuple=True)
-  if is_training:
-    cell = tf.contrib.rnn.DropoutWrapper(cell, output_keep_prob=0.8)
   return cell
 
 
@@ -713,10 +610,10 @@ def stochastic_beam_dec(length,
 def make_logit_fn(vocab_embedding, copy_embedding=None, copy_ids=None, is_training=True):
   if copy_embedding == None or copy_ids == None:
     def logit_fn(outputs):
-      outputs_vocab = ResDNN(outputs, size, 2, is_training=is_training, scope="proj_vocab")
-      logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_vocab, [-1, size]), 
+      outputs_proj = fully_connected(outputs, size, is_training=is_training, scope="proj")
+      logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_proj, [-1, size]), 
           tf.transpose(vocab_embedding/(tf.norm(vocab_embedding, axis=1, keep_dims=True)+1e-20))),
-          outputs.get_shape()[:-1]+[-1])
+          tf.concat([tf.shape(outputs)[:-1], tf.constant(-1, shape=[1])], 0))
       return logits_vocab
   else:
     def logit_fn(outputs):
@@ -724,8 +621,8 @@ def make_logit_fn(vocab_embedding, copy_embedding=None, copy_ids=None, is_traini
       length = copy_embedding.get_shape()[1].value
       size = vocab_embedding.get_shape()[-1].value
       vocab_size = vocab_embedding.get_shape()[0].value
-      outputs_vocab = ResDNN(outputs, size, 2, is_training=is_training, scope="proj_vocab")
-      outputs_copy = ResDNN(outputs, size, 2, is_training=is_training, scope="proj_copy")
+      outputs_vocab = fully_connected(outputs, size, is_training=is_training, scope="vocab")
+      outputs_copy = fully_connected(outputs, size, is_training=is_training, scope="copy")
       if outputs.get_shape().ndims == 3:
         beam_size = outputs.get_shape()[1].value
         logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_vocab, [-1, size]), 
