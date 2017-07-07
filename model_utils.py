@@ -421,12 +421,12 @@ def stochastic_dec(length,
   mask = tf.equal(symbol, 0)
   seq = [symbol]
   tf.get_variable_scope().reuse_variables()
+
+  beam_parents = tf.reshape(tf.tile(tf.expand_dims(tf.range(batch_size), 1), [1, num_candidates]), [-1])
   if isinstance(state, tuple):
-    state = tuple([tf.reshape(tf.stack([s]*num_candidates, axis=1), 
-        [batch_size*num_candidates] + s.get_shape()[1:]) for s in state])
+    state = tuple([tf.gather(s, beam_parents) for s in state])
   else:
-    state = tf.reshape(tf.stack([state]*num_candidates, axis=1), 
-        [batch_size*num_candidates] + state.get_shape()[1:])
+    state = tf.gather(state, beam_parent)
 
   for _ in xrange(length-1):
 
