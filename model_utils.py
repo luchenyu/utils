@@ -426,7 +426,7 @@ def stochastic_dec(length,
   if isinstance(state, tuple):
     state = tuple([tf.gather(s, beam_parents) for s in state])
   else:
-    state = tf.gather(state, beam_parent)
+    state = tf.gather(state, beam_parents)
 
   for _ in xrange(length-1):
 
@@ -610,6 +610,7 @@ def stochastic_beam_dec(length,
 def make_logit_fn(vocab_embedding, copy_embedding=None, copy_ids=None, is_training=True):
   if copy_embedding == None or copy_ids == None:
     def logit_fn(outputs):
+      size = vocab_embedding.get_shape()[-1].value
       outputs_proj = fully_connected(outputs, size, is_training=is_training, scope="proj")
       logits_vocab = tf.reshape(tf.matmul(tf.reshape(outputs_proj, [-1, size]), 
           tf.transpose(vocab_embedding/(tf.norm(vocab_embedding, axis=1, keep_dims=True)+1e-20))),
