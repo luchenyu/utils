@@ -335,66 +335,94 @@ def attention(query,
     logits = fully_connected(
         tf.tanh(query+keys), 1, is_training=is_training, scope="attention")
     logits = tf.squeeze(logits, [2])
-    fillers = tf.tile(tf.expand_dims(tf.reduce_min(logits, 1) - 20.0, 1), [1, tf.shape(logits)[1]])
-    logits = tf.where(masks, logits, fillers)
-    results = tf.reduce_sum(tf.expand_dims(tf.nn.softmax(logits), 2) * values, [1])
+    probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
+    probs = probs / tf.reduce_sum(probs, -1, keep_dims=True)
+    results = tf.reduce_sum(tf.expand_dims(probs, 2) * values, [1])
     return results
 
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
-  """Wrapper for attention mechanism"""
+    """Wrapper for attention mechanism"""
 
-  def __init__(self, cell, num_attention=2, self_attention_idx=0, attention_fn=attention, is_training=True):
-    self.cell = cell
-    self.num_attention = num_attention
-    self.self_attention_idx = self_attention_idx
-    self.attention_fn = attention_fn
-    self.is_training=is_training
+    def __init__(self,
+                 cell,
+                 num_attention=2,
+                 self_attention_idx=0,
+                 attention_fn=attention,
+                 is_training=True):
+        self.cell = cell
+        self.num_attention = num_attention
+        self.self_attention_idx = self_attention_idx
+        self.attention_fn = attention_fn
+        self.is_training=is_training
 
-  def __call__(self, inputs, state, scope=None):
-    with tf.variable_scope(scope or type(self).__name__):
-      keys = []
-      values = []
-      masks = []
-      attn_feats = []
-      for _ in xrange(self.num_attention):
-        keys.append(state[0])
-        values.append(state[1])
-        masks.append(state[2])
-        attn_feats.append(state[3])
-        state = state[4:]
-      cell_state = state if len(state) > 1 else state[0]
-      batch_size = tf.shape(inputs)[0]
-      input_size = inputs.get_shape()[1].value
+    def __call__(self,
+                 inputs,
+                 state,
+                 scope=None):
+        with tf.variable_scope(scope or type(self).__name__):
+            keys = []
+            values = []
+            masks = []
+            attn_feats = []
+            for _ in xrange(self.num_attention):
+                keys.append(state[0])
+                values.append(state[1])
+                masks.append(state[2])
+                attn_feats.append(state[3])
+                state = state[4:]
+            cell_state = state if len(state) > 1 else state[0]
+            batch_size = tf.shape(inputs)[0]
 
-      cell_outputs, cell_state = self.cell(inputs, cell_state)
-      # update self attention
-      if self.self_attention_idx >= 0 and self.self_attention_idx < self.num_attention:
-        value_size = values[self.self_attention_idx].get_shape()[-1].value
-        key_size = keys[self.self_attention_idx].get_shape()[-1].value
-        new_value = cell_outputs
-        values[self.self_attention_idx] = tf.concat([values[self.self_attention_idx],
-            tf.reshape(new_value, [batch_size, 1, value_size])], axis=1)
-        new_key = fully_connected(new_value, key_size, is_training=self.is_training, scope="key")
-        keys[self.self_attention_idx] = tf.concat([keys[self.self_attention_idx],
-            tf.reshape(new_key, [batch_size, 1, key_size])], axis=1)
-        new_mask = tf.equal(tf.zeros([batch_size, 1]), 0.0)
-        masks[self.self_attention_idx] = tf.concat([masks[self.self_attention_idx], new_mask], axis=1)
+            cell_outputs, cell_state = self.cell(inputs, cell_state)
+            # update self attention
+            if (self.self_attention_idx >= 0 and
+                self.self_attention_idx < self.num_attention):
+                value_size = values[self.self_attention_idx].get_shape()[-1].value
+                key_size = keys[self.self_attention_idx].get_shape()[-1].value
+                new_value = cell_outputs
+                values[self.self_attention_idx] = tf.concat(
+                    [values[self.self_attention_idx],
+                     tf.reshape(new_value, [batch_size, 1, value_size])],
+                    axis=1)
+                new_key = fully_connected(new_value,
+                                          key_size,
+                                          is_training=self.is_training,
+                                          scope="key")
+                keys[self.self_attention_idx] = tf.concat(
+                    [keys[self.self_attention_idx],
+                     tf.reshape(new_key, [batch_size, 1, key_size])],
+                    axis=1)
+                new_mask = tf.ones([batch_size, 1], dtype=tf.bool)
+                masks[self.self_attention_idx] = tf.concat(
+                    [masks[self.self_attention_idx], new_mask],
+                    axis=1)
 
-      # attend
-      for i in xrange(self.num_attention):
-        value_size = values[i].get_shape()[-1].value
-        key_size = keys[i].get_shape()[-1].value
-        query = fully_connected(tf.concat([cell_outputs, attn_feats[i]], axis=1), key_size,
-            is_training=self.is_training, scope="query_proj"+str(i))
-        with tf.variable_scope("attention"+str(i)):
-          attn_feats[i] = self.attention_fn(query, keys[i], values[i], masks[i], is_training=self.is_training)
-      outputs = tf.concat([cell_outputs,] +  attn_feats, 1)
-      cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
-      state = []
-      for i in xrange(self.num_attention):
-        state.extend([keys[i], values[i], masks[i], attn_feats[i]])
-      state = tuple(state) + cell_state
-    return outputs, state
+            # attend
+            key_sizes = []
+            for i in xrange(self.num_attention):
+                key_sizes.append(keys[i].get_shape()[-1].value)
+            query_all = fully_connected(
+                tf.concat([cell_outputs,] + attn_feats, axis=-1),
+                sum(key_sizes),
+                is_training=self.is_training,
+                scope="query_proj")
+            queries = tf.split(query_all, key_sizes, axis=-1)
+            for i in xrange(self.num_attention):
+                query = queries[i]
+                with tf.variable_scope("attention"+str(i)):
+                    attn_feats[i] = self.attention_fn(
+                        query,
+                        keys[i],
+                        values[i],
+                        masks[i],
+                        is_training=self.is_training)
+            outputs = tf.concat([cell_outputs,] +  attn_feats, 1)
+            cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
+            state = []
+            for i in xrange(self.num_attention):
+                state.extend([keys[i], values[i], masks[i], attn_feats[i]])
+            state = tuple(state) + cell_state
+            return outputs, state
 
 
 def create_cell(size,
@@ -698,7 +726,8 @@ def stochastic_beam_dec(length,
             tf.to_float(tf.map_fn(fn,
                                   paths,
                                   dtype=tf.int32,
-                                  parallel_iterations=100000)),
+                                  parallel_iterations=100000,
+                                  swap_memory=True)),
             [batch_size, beam_size])
         close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
             tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
@@ -765,14 +794,11 @@ def make_logit_fn(vocab_embedding,
             length = copy_embedding.get_shape()[1].value
             size = vocab_embedding.get_shape()[-1].value
             vocab_size = vocab_embedding.get_shape()[0].value
-            outputs_vocab = fully_connected(outputs,
-                                            size,
-                                            is_training=is_training,
-                                            scope="vocab")
-            outputs_copy = fully_connected(outputs,
-                                           size,
+            outputs_proj = fully_connected(outputs,
+                                           2*size,
                                            is_training=is_training,
-                                           scope="copy")
+                                           scope="proj")
+            outputs_vocab, outputs_copy = tf.split(outputs_proj, 2, axis=-1)
             if outputs.get_shape().ndims == 3:
                 beam_size = outputs.get_shape()[1].value
                 logits_vocab = tf.reshape(
@@ -810,7 +836,7 @@ def make_logit_fn(vocab_embedding,
                             keep_dims=True)+1e-20),
                         [0, 2, 1]))
             beam_size = tf.shape(logits_copy)[1]
-            data = tf.reshape(logits_copy, [-1])
+            data = tf.nn.relu(tf.reshape(logits_copy, [-1]))
             indices = tf.reshape(
                 tf.reshape(
                     tf.tile(tf.expand_dims(copy_ids, 1), [1, beam_size, 1]),
