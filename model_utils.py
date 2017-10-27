@@ -336,9 +336,9 @@ def attention(query,
         tf.tanh(query+keys), 1, is_training=is_training, scope="attention")
     logits = tf.squeeze(logits, [2])
     probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
-    probs = probs / tf.reduce_sum(probs, -1, keep_dims=True)
-    results = tf.reduce_sum(tf.expand_dims(probs, 2) * values, [1])
-    return results
+    attn_dist = probs / tf.reduce_sum(probs, -1, keep_dims=True)
+    attn_feat = tf.reduce_sum(tf.expand_dims(attn_dist, 2) * values, [1])
+    return attn_feat, attn_dist
 
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
     """Wrapper for attention mechanism"""
@@ -347,11 +347,14 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                  cell,
                  num_attention=2,
                  self_attention_idx=0,
+                 use_copy=None,
                  attention_fn=attention,
                  is_training=True):
         self.cell = cell
         self.num_attention = num_attention
         self.self_attention_idx = self_attention_idx
+        self.use_copy = use_copy if use_copy != None else [False]*num_attention
+        assert(len(self.use_copy) == self.num_attention)
         self.attention_fn = attention_fn
         self.is_training=is_training
 
@@ -407,16 +410,29 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                 is_training=self.is_training,
                 scope="query_proj")
             queries = tf.split(query_all, key_sizes, axis=-1)
+            copy_logits = [tf.zeros([batch_size, 1])]
+            copy_dists = []
             for i in xrange(self.num_attention):
                 query = queries[i]
                 with tf.variable_scope("attention"+str(i)):
-                    attn_feats[i] = self.attention_fn(
+                    attn_feats[i], attn_dist = self.attention_fn(
                         query,
                         keys[i],
                         values[i],
                         masks[i],
                         is_training=self.is_training)
-            outputs = tf.concat([cell_outputs,] +  attn_feats, 1)
+                if self.use_copy[i]:
+                    with tf.variable_scope("copy"+str(i)):
+                        copy_logits.append(fully_connected(
+                            tf.concat([cell_outputs, attn_feats[i]], axis=-1),
+                            1,
+                            is_training=self.is_training,
+                            scope="copy_logit"))
+                    copy_dists.append(attn_dist)
+            outputs = [tf.concat([cell_outputs,] +  attn_feats, 1),]
+            outputs = tuple(
+                outputs + [tf.concat(copy_logits, axis=-1), tuple(copy_dists)]
+                if len(copy_dists) > 0 else outputs[0])
             cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
             state = []
             for i in xrange(self.num_attention):
@@ -578,7 +594,7 @@ def beam_dec(length,
     best_probs, indices = tf.nn.top_k(probs, beam_size)
 
     symbols = indices % vocab_size + 1
-    beam_parent = indices // vocab_size
+    beam_parent = indices // (vocab_size - 1)
     beam_parent = tf.reshape(
         tf.expand_dims(tf.range(batch_size), 1) + beam_parent, [-1])
     paths = tf.reshape(symbols, [-1, 1])
@@ -677,7 +693,7 @@ def stochastic_beam_dec(length,
     best_probs, indices = tf.nn.top_k(probs, beam_size)
 
     symbols = indices % vocab_size + 1
-    beam_parent = indices // vocab_size
+    beam_parent = indices // (vocab_size - 1)
     beam_parent = tf.reshape(
         tf.expand_dims(tf.range(batch_size), 1) + beam_parent,
         [-1])
@@ -764,14 +780,13 @@ def stochastic_beam_dec(length,
 ### Copy Mechanism ###
 
 def make_logit_fn(vocab_embedding,
-                  copy_embedding=None,
                   copy_ids=None,
                   is_training=True):
     """implements logit function with copy mechanism
 
     """
 
-    if copy_embedding == None or copy_ids == None:
+    if copy_ids == None:
         def logit_fn(outputs):
             size = vocab_embedding.get_shape()[-1].value
             outputs_proj = fully_connected(outputs,
@@ -790,15 +805,17 @@ def make_logit_fn(vocab_embedding,
             return logits_vocab
     else:
         def logit_fn(outputs):
-            batch_size = tf.shape(copy_embedding)[0]
-            length = copy_embedding.get_shape()[1].value
+            batch_size = tf.shape(copy_ids[0])[0]
             size = vocab_embedding.get_shape()[-1].value
             vocab_size = vocab_embedding.get_shape()[0].value
-            outputs_proj = fully_connected(outputs,
-                                           2*size,
+            outputs, copy_logits, copy_dists = outputs
+            copy_weights = tf.unstack(tf.nn.softmax(copy_logits), axis=-1)
+            assert(len(copy_ids) == len(copy_dists) and
+                   len(copy_ids) == len(copy_weights)-1)
+            outputs_vocab = fully_connected(outputs,
+                                           size,
                                            is_training=is_training,
                                            scope="proj")
-            outputs_vocab, outputs_copy = tf.split(outputs_proj, 2, axis=-1)
             if outputs.get_shape().ndims == 3:
                 beam_size = outputs.get_shape()[1].value
                 logits_vocab = tf.reshape(
@@ -809,14 +826,6 @@ def make_logit_fn(vocab_embedding,
                                   axis=1,
                                   keep_dims=True)+1e-20))),
                     [batch_size, beam_size, vocab_size])
-                logits_copy = tf.matmul(
-                    outputs_copy,
-                    tf.transpose(
-                        copy_embedding/(tf.norm(
-                            copy_embedding,
-                            axis=2,
-                            keep_dims=True)+1e-20),
-                        [0, 2, 1]))
             else:
                 assert(outputs.get_shape().ndims == 2)
                 logits_vocab = tf.reshape(
@@ -827,32 +836,26 @@ def make_logit_fn(vocab_embedding,
                             axis=1,
                             keep_dims=True)+1e-20))),
                     [batch_size, -1, vocab_size])
-                logits_copy = tf.matmul(
-                    tf.reshape(outputs_copy, [batch_size, -1, size]),
-                    tf.transpose(
-                        copy_embedding/(tf.norm(
-                            copy_embedding,
-                            axis=2,
-                            keep_dims=True)+1e-20),
-                        [0, 2, 1]))
-            beam_size = tf.shape(logits_copy)[1]
-            data = tf.nn.relu(tf.reshape(logits_copy, [-1]))
-            indices = tf.reshape(
-                tf.reshape(
-                    tf.tile(tf.expand_dims(copy_ids, 1), [1, beam_size, 1]),
-                    [-1, length]) + tf.expand_dims(
-                        tf.range(batch_size*beam_size) * vocab_size, 1),
-                [-1])
-            logits_copy = tf.reshape(
-                tf.unsorted_segment_sum(data,
-                                        indices,
-                                        batch_size*beam_size*vocab_size),
-                [batch_size, beam_size, vocab_size])
-            logits_copy = tf.concat(
-                [tf.zeros([batch_size, beam_size, 1]),
-                 tf.slice(logits_copy, [0, 0, 1], [-1, -1, -1])],
-                2)
-            logits = logits_vocab + logits_copy
+            beam_size = tf.shape(logits_vocab)[1]
+            probs = tf.nn.softmax(logits_vocab)*tf.reshape(
+                copy_weights[0],
+                [batch_size, beam_size, 1])
+            for i in xrange(len(copy_ids)):
+                length = copy_ids[i].get_shape()[1].value
+                data = tf.reshape(copy_dists[i], [batch_size, beam_size, length])
+                data *= tf.reshape(copy_weights[i+1], [batch_size, beam_size, 1])
+                batch_idx = tf.tile(
+                    tf.expand_dims(tf.expand_dims(tf.range(batch_size), 1), 2),
+                    [1, beam_size, length])
+                beam_idx = tf.tile(
+                    tf.expand_dims(tf.expand_dims(tf.range(beam_size), 0), 2),
+                    [batch_size, 1, length])
+                vocab_idx = tf.tile(
+                    tf.expand_dims(copy_ids[i], 1),
+                    [1, beam_size, 1])
+                indices = tf.stack([batch_idx, beam_idx, vocab_idx], axis=-1)
+                probs += tf.scatter_nd(indices, data, tf.shape(probs))
+            logits = tf.log(probs)
             if outputs.get_shape().ndims == 2:
                 logits = tf.reshape(logits, [-1, vocab_size])
             return logits
