@@ -323,6 +323,7 @@ def attention(query,
               keys,
               values,
               masks,
+              coverage=None,
               is_training=True):
     """ implements the attention mechanism
 
@@ -332,13 +333,29 @@ def attention(query,
     """
 
     query = tf.expand_dims(query, 1)
+    if coverage != None:
+        c = tf.expand_dims(tf.expand_dims(coverage, 1), 3)
+        size = query.get_shape()[-1].value
+        feat = query + keys + tf.squeeze(
+            convolution2d(c,
+                          size,
+                          [1, 5],
+                          is_training=is_training,
+                          scope="coverage"),
+            axis=[1])
+    else:
+        feat = query + keys
     logits = fully_connected(
-        tf.tanh(query+keys), 1, is_training=is_training, scope="attention")
+        tf.tanh(feat), 1, is_training=is_training, scope="attention")
     logits = tf.squeeze(logits, [2])
     probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
     attn_dist = probs / tf.reduce_sum(probs, -1, keep_dims=True)
     attn_feat = tf.reduce_sum(tf.expand_dims(attn_dist, 2) * values, [1])
-    return attn_feat, attn_dist
+    if coverage != None:
+        coverage += attn_dist
+        return attn_feat, attn_dist, coverage
+    else:
+        return attn_feat, attn_dist, None
 
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
     """Wrapper for attention mechanism"""
@@ -367,12 +384,14 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
             values = []
             masks = []
             attn_feats = []
+            coverages = []
             for _ in xrange(self.num_attention):
                 keys.append(state[0])
                 values.append(state[1])
                 masks.append(state[2])
                 attn_feats.append(state[3])
-                state = state[4:]
+                coverages.append(state[4])
+                state = state[5:]
             cell_state = state if len(state) > 1 else state[0]
             batch_size = tf.shape(inputs)[0]
 
@@ -415,11 +434,12 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
             for i in xrange(self.num_attention):
                 query = queries[i]
                 with tf.variable_scope("attention"+str(i)):
-                    attn_feats[i], attn_dist = self.attention_fn(
+                    attn_feats[i], attn_dist, coverage = self.attention_fn(
                         query,
                         keys[i],
                         values[i],
                         masks[i],
+                        coverages[i],
                         is_training=self.is_training)
                 if self.use_copy[i]:
                     with tf.variable_scope("copy"+str(i)):
@@ -436,7 +456,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
             cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
             state = []
             for i in xrange(self.num_attention):
-                state.extend([keys[i], values[i], masks[i], attn_feats[i]])
+                state.extend([keys[i], values[i], masks[i], attn_feats[i], coverages[i]])
             state = tuple(state) + cell_state
             return outputs, state
 
