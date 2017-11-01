@@ -365,6 +365,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                  num_attention=2,
                  self_attention_idx=0,
                  use_copy=None,
+                 use_coverage=None,
                  attention_fn=attention,
                  is_training=True):
         self.cell = cell
@@ -372,6 +373,8 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
         self.self_attention_idx = self_attention_idx
         self.use_copy = use_copy if use_copy != None else [False]*num_attention
         assert(len(self.use_copy) == self.num_attention)
+        self.use_coverage = use_coverage if use_coverage != None else [False]*num_attention
+        assert(len(self.use_coverage) == self.num_attention)
         self.attention_fn = attention_fn
         self.is_training=is_training
 
@@ -385,13 +388,17 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
             masks = []
             attn_feats = []
             coverages = []
-            for _ in xrange(self.num_attention):
+            for i in xrange(self.num_attention):
                 keys.append(state[0])
                 values.append(state[1])
                 masks.append(state[2])
                 attn_feats.append(state[3])
-                coverages.append(state[4])
-                state = state[5:]
+                if self.use_coverage[i]:
+                    coverages.append(state[4])
+                    state = state[5:]
+                else:
+                    coverages.append(None)
+                    state = state[4:]
             cell_state = state if len(state) > 1 else state[0]
             batch_size = tf.shape(inputs)[0]
 
@@ -456,7 +463,10 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
             cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
             state = []
             for i in xrange(self.num_attention):
-                state.extend([keys[i], values[i], masks[i], attn_feats[i], coverages[i]])
+                if self.use_coverage[i]:
+                    state.extend([keys[i], values[i], masks[i], attn_feats[i], coverages[i]])
+                else:
+                    state.extend([keys[i], values[i], masks[i], attn_feats[i]])
             state = tuple(state) + cell_state
             return outputs, state
 
