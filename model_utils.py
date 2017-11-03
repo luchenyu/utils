@@ -54,6 +54,14 @@ def fully_connected(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
+        weights_norm = tf.contrib.framework.model_variable(
+            'weights_norm',
+            shape=[1, num_outputs],
+            dtype=dtype,
+            initializer=tf.contrib.layers.xavier_initializer(),
+            collections=tf.GraphKeys.WEIGHTS,
+            trainable=True)
+        weights = tf.nn.l2_normalize(weights, 0) * weights_norm
         biases = tf.contrib.framework.model_variable(
             'biases',
             shape=[num_outputs,],
@@ -125,6 +133,15 @@ def convolution2d(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
+        weights_norm = tf.contrib.framework.model_variable(
+            'weights_norm',
+            shape=[1, 1, 1, num_outputs],
+            dtype=dtype,
+            initializer=tf.contrib.layers.xavier_initializer(),
+            collections=tf.GraphKeys.WEIGHTS,
+            trainable=True)
+        weights = tf.nn.l2_normalize(tf.reshape(weights, [-1, num_outputs]), 0)
+        weights = tf.reshape(weights, weights_shape) * weights_norm
         biases = tf.contrib.framework.model_variable(
             name='biases',
             shape=[num_outputs,],
