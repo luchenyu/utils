@@ -61,7 +61,7 @@ def fully_connected(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
-        weights = tf.nn.l2_normalize(weights, 0) * weights_norm
+        weights = tf.nn.l2_normalize(weights, 0) * tf.exp(weights_norm)
         biases = tf.contrib.framework.model_variable(
             'biases',
             shape=[num_outputs,],
@@ -141,7 +141,7 @@ def convolution2d(inputs,
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
         weights = tf.nn.l2_normalize(tf.reshape(weights, [-1, num_outputs]), 0)
-        weights = tf.reshape(weights, weights_shape) * weights_norm
+        weights = tf.reshape(weights, weights_shape) * tf.exp(weights_norm)
         biases = tf.contrib.framework.model_variable(
             name='biases',
             shape=[num_outputs,],
@@ -453,7 +453,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                 is_training=self.is_training,
                 scope="query_proj")
             queries = tf.split(query_all, key_sizes, axis=-1)
-            copy_logits = [tf.zeros([batch_size, 1])]
+            copy_logits = []
             copy_dists = []
             for i in xrange(self.num_attention):
                 query = queries[i]
@@ -665,8 +665,9 @@ def beam_dec(length,
         outputs, state = cell(inputs, state)
         logits = logit_fn(outputs)
 
-        prev = tf.reshape(tf.nn.log_softmax(logits),
-                          [batch_size, beam_size, vocab_size])
+        prev = tf.reshape(
+            tf.nn.log_softmax(logits),
+            [batch_size, beam_size, vocab_size])
 
         # add the path and score of the candidates in the current beam to the lists
         fn = lambda seq: tf.size(tf.unique(seq)[0])
@@ -674,10 +675,17 @@ def beam_dec(length,
             tf.to_float(tf.map_fn(fn,
                                   paths,
                                   dtype=tf.int32,
-                                  parallel_iterations=100000)),
+                                  parallel_iterations=100000,
+                                  back_prop=False,
+                                  swap_memory=True,
+                                  infer_shape=False)),
             [batch_size, beam_size])
-        close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
-            tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
+        if gamma == 0.0:
+            close_score = best_probs + tf.squeeze(
+                tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
+        else:
+            close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
+                tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
         candidates.append(tf.reshape(tf.pad(paths,
                                             [[0, 0], [0, length-1-i]],
                                             "CONSTANT"),
@@ -856,41 +864,48 @@ def make_logit_fn(vocab_embedding,
             size = vocab_embedding.get_shape()[-1].value
             vocab_size = vocab_embedding.get_shape()[0].value
             outputs, copy_logits, copy_dists = outputs
-            copy_weights = tf.unstack(tf.nn.softmax(copy_logits), axis=-1)
+            copy_logits = tf.unstack(tf.nn.relu(copy_logits), axis=-1)
             assert(len(copy_ids) == len(copy_dists) and
-                   len(copy_ids) == len(copy_weights)-1)
+                   len(copy_ids) == len(copy_logits))
             outputs_vocab = fully_connected(outputs,
-                                           size,
-                                           is_training=is_training,
-                                           scope="proj")
+                                            size,
+                                            is_training=is_training,
+                                            scope="proj")
+            outputs_vocab_norm = fully_connected(outputs,
+                                                 16,
+                                                 is_training=is_training,
+                                                 scope="norm")
+            outputs_vocab = tf.stack(
+                tf.split(outputs_vocab, 16, axis=-1), axis=-2)
+            outputs_vocab /= (tf.norm(
+                outputs_vocab,
+                axis=-1,
+                keep_dims=True) + 1e-20)
+            outputs_vocab *= tf.nn.relu(
+                tf.expand_dims(outputs_vocab_norm, axis=-1))
+            outputs_vocab = tf.concat(
+                tf.unstack(outputs_vocab, axis=-2),
+                axis=-1)
             if outputs.get_shape().ndims == 3:
                 beam_size = outputs.get_shape()[1].value
                 logits_vocab = tf.reshape(
                     tf.matmul(tf.reshape(outputs_vocab,
                                          [-1, size]),
-                              tf.transpose(vocab_embedding/(tf.norm(
-                                  vocab_embedding,
-                                  axis=1,
-                                  keep_dims=True)+1e-20))),
+                              tf.transpose(vocab_embedding)),
                     [batch_size, beam_size, vocab_size])
             else:
                 assert(outputs.get_shape().ndims == 2)
                 logits_vocab = tf.reshape(
                     tf.matmul(
                         outputs_vocab,
-                        tf.transpose(vocab_embedding/(tf.norm(
-                            vocab_embedding,
-                            axis=1,
-                            keep_dims=True)+1e-20))),
+                        tf.transpose(vocab_embedding)),
                     [batch_size, -1, vocab_size])
             beam_size = tf.shape(logits_vocab)[1]
-            probs = tf.nn.softmax(logits_vocab)*tf.reshape(
-                copy_weights[0],
-                [batch_size, beam_size, 1])
+            logits = logits_vocab
             for i in xrange(len(copy_ids)):
                 length = copy_ids[i].get_shape()[1].value
                 data = tf.reshape(copy_dists[i], [batch_size, beam_size, length])
-                data *= tf.reshape(copy_weights[i+1], [batch_size, beam_size, 1])
+                data *= tf.reshape(copy_logits[i], [batch_size, beam_size, 1])
                 batch_idx = tf.tile(
                     tf.expand_dims(tf.expand_dims(tf.range(batch_size), 1), 2),
                     [1, beam_size, length])
@@ -901,8 +916,7 @@ def make_logit_fn(vocab_embedding,
                     tf.expand_dims(copy_ids[i], 1),
                     [1, beam_size, 1])
                 indices = tf.stack([batch_idx, beam_idx, vocab_idx], axis=-1)
-                probs += tf.scatter_nd(indices, data, tf.shape(probs))
-            logits = tf.log(probs)
+                logits += tf.scatter_nd(indices, data, tf.shape(logits))
             if outputs.get_shape().ndims == 2:
                 logits = tf.reshape(logits, [-1, vocab_size])
             return logits
