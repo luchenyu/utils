@@ -56,12 +56,12 @@ def fully_connected(inputs,
             trainable=True)
         weights_norm = tf.contrib.framework.model_variable(
             'weights_norm',
-            shape=[1, num_outputs],
+            shape=[num_outputs,],
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
-        weights = tf.nn.l2_normalize(weights, 0) * tf.exp(weights_norm)
+        weights = tf.nn.l2_normalize(weights, 0)
         biases = tf.contrib.framework.model_variable(
             'biases',
             shape=[num_outputs,],
@@ -77,7 +77,7 @@ def fully_connected(inputs,
         if dropout != None and is_training:
             inputs = tf.nn.dropout(inputs, dropout)
 
-        outputs = tf.matmul(inputs, weights)
+        outputs = tf.matmul(inputs, weights) * tf.exp(weights_norm)
         moving_mean = tf.contrib.framework.model_variable(
             'moving_mean',
             shape=[num_outputs,],
@@ -141,7 +141,7 @@ def convolution2d(inputs,
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
         weights = tf.nn.l2_normalize(tf.reshape(weights, [-1, num_outputs]), 0)
-        weights = tf.reshape(weights, weights_shape) * tf.exp(weights_norm)
+        weights = tf.reshape(weights, weights_shape)
         biases = tf.contrib.framework.model_variable(
             name='biases',
             shape=[num_outputs,],
@@ -153,7 +153,8 @@ def convolution2d(inputs,
         if dropout != None and is_training:
             inputs = tf.nn.dropout(inputs, dropout)
 
-        outputs = tf.nn.conv2d(inputs, weights, [1,1,1,1], padding='SAME')
+        outputs = tf.nn.conv2d(
+            inputs, weights, [1,1,1,1], padding='SAME') * tf.exp(weights_norm)
         moving_mean = tf.contrib.framework.model_variable(
             'moving_mean',
             shape=[num_outputs,],
@@ -844,17 +845,26 @@ def make_logit_fn(vocab_embedding,
     if copy_ids == None:
         def logit_fn(outputs):
             size = vocab_embedding.get_shape()[-1].value
-            outputs_proj = fully_connected(outputs,
-                                           size,
+            outputs_vocab = fully_connected(outputs,
+                                           size+16,
                                            is_training=is_training,
                                            scope="proj")
+            outputs_vocab_main, outputs_vocab_norm = tf.split(
+                outputs_vocab,
+                [size, 16],
+                axis=-1)
+            outputs_vocab_main = tf.stack(
+                tf.split(outputs_vocab_main, 16, axis=-1), axis=-2)
+            outputs_vocab_main = tf.nn.l2_normalize(outputs_vocab_main, -1)
+            outputs_vocab = outputs_vocab_main * tf.nn.relu(
+                tf.expand_dims(outputs_vocab_norm, axis=-1))
+            outputs_vocab = tf.concat(
+                tf.unstack(outputs_vocab, axis=-2),
+                axis=-1)
             logits_vocab = tf.reshape(
-                tf.matmul(tf.reshape(outputs_proj,
+                tf.matmul(tf.reshape(outputs_vocab,
                                      [-1, size]),
-                          tf.transpose(vocab_embedding/(tf.norm(
-                              vocab_embedding,
-                              axis=1,
-                              keep_dims=True)+1e-20))),
+                          vocab_embedding),
                 tf.concat([tf.shape(outputs)[:-1],
                            tf.constant(-1, shape=[1])], 0))
             return logits_vocab
@@ -868,20 +878,17 @@ def make_logit_fn(vocab_embedding,
             assert(len(copy_ids) == len(copy_dists) and
                    len(copy_ids) == len(copy_logits))
             outputs_vocab = fully_connected(outputs,
-                                            size,
-                                            is_training=is_training,
-                                            scope="proj")
-            outputs_vocab_norm = fully_connected(outputs,
-                                                 16,
-                                                 is_training=is_training,
-                                                 scope="norm")
-            outputs_vocab = tf.stack(
-                tf.split(outputs_vocab, 16, axis=-1), axis=-2)
-            outputs_vocab /= (tf.norm(
+                                           size+16,
+                                           is_training=is_training,
+                                           scope="proj")
+            outputs_vocab_main, outputs_vocab_norm = tf.split(
                 outputs_vocab,
-                axis=-1,
-                keep_dims=True) + 1e-20)
-            outputs_vocab *= tf.nn.relu(
+                [size, 16],
+                axis=-1)
+            outputs_vocab_main = tf.stack(
+                tf.split(outputs_vocab_main, 16, axis=-1), axis=-2)
+            outputs_vocab_main = tf.nn.l2_normalize(outputs_vocab_main, -1)
+            outputs_vocab = outputs_vocab_main * tf.nn.relu(
                 tf.expand_dims(outputs_vocab_norm, axis=-1))
             outputs_vocab = tf.concat(
                 tf.unstack(outputs_vocab, axis=-2),
