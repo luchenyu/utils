@@ -133,14 +133,26 @@ def convolution2d(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
-        weights_norm = tf.contrib.framework.model_variable(
-            'weights_norm',
-            shape=[1, 1, 1, num_outputs],
+        weights_norm1 = tf.contrib.framework.model_variable(
+            'weights_norm1',
+            shape=[num_filters_in, num_outputs],
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
-        weights = tf.nn.l2_normalize(tf.reshape(weights, [-1, num_outputs]), 0)
+        weights_norm2 = tf.contrib.framework.model_variable(
+            'weights_norm2',
+            shape=[num_outputs,],
+            dtype=dtype,
+            initializer=tf.contrib.layers.xavier_initializer(),
+            collections=tf.GraphKeys.WEIGHTS,
+            trainable=True)
+        weights = tf.nn.l2_normalize(
+            tf.reshape(weights, [-1, num_filters_in, num_outputs]), 0)
+        weights_norm1 = tf.expand_dims(
+            tf.nn.l2_normalize(weights_norm1, 0),
+            axis=0)
+        weights *= weights_norm1
         weights = tf.reshape(weights, weights_shape)
         biases = tf.contrib.framework.model_variable(
             name='biases',
@@ -154,7 +166,7 @@ def convolution2d(inputs,
             inputs = tf.nn.dropout(inputs, dropout)
 
         outputs = tf.nn.conv2d(
-            inputs, weights, [1,1,1,1], padding='SAME') * tf.exp(weights_norm)
+            inputs, weights, [1,1,1,1], padding='SAME') * tf.exp(weights_norm2)
         moving_mean = tf.contrib.framework.model_variable(
             'moving_mean',
             shape=[num_outputs,],
@@ -864,7 +876,7 @@ def make_logit_fn(vocab_embedding,
             logits_vocab = tf.reshape(
                 tf.matmul(tf.reshape(outputs_vocab,
                                      [-1, size]),
-                          vocab_embedding),
+                          tf.transpose(vocab_embedding)),
                 tf.concat([tf.shape(outputs)[:-1],
                            tf.constant(-1, shape=[1])], 0))
             return logits_vocab
