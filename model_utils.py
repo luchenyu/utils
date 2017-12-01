@@ -376,6 +376,43 @@ def attention(query,
     else:
         return attn_feat, attn_dist, None
 
+def dynamic_attention(query,
+                      keys,
+                      values,
+                      masks,
+                      coverage=None,
+                      is_training=True):
+    """dynamic attend on lower layer inputs
+
+    query: [batch_size x dim]
+    keys: [batch_size x length x dim]
+    values: [batch_size x length x dim]
+    """
+
+    size = query.get_shape()[1].value
+    attn_feat = tf.zeros(tf.shape(query))
+    query = tf.expand_dims(query, 1)
+    attn_logits, votes = tf.split(
+        fully_connected(tf.nn.relu(query + keys),
+                        size+1,
+                        is_training=is_training,
+                        scope='votes'),
+        [1, size],
+        axis=-1)
+    attn_logits = tf.nn.relu(tf.squeeze(attn_logits, axis=-1))
+    attn_logits = tf.where(masks, attn_logits, tf.zeros(tf.shape(attn_logits)))
+    for _ in xrange(3):
+        attn_feat = tf.expand_dims(attn_feat, 2)
+        logits = tf.squeeze(tf.matmul(votes, attn_feat), axis=-1)
+        probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
+        probs = probs / tf.reduce_sum(probs, -1, keep_dims=True)
+        attn_feat = tf.reduce_sum(tf.expand_dims(probs, 2) * votes, [1])
+    if coverage != None:
+        coverage += probs
+        return attn_feat, attn_logits, coverage
+    else:
+        return attn_feat, attn_logits, None
+
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
     """Wrapper for attention mechanism"""
 
@@ -456,11 +493,10 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                 scope="query_proj")
             queries = tf.split(query_all, key_sizes, axis=-1)
             copy_logits = []
-            copy_dists = []
             for i in xrange(self.num_attention):
                 query = queries[i]
                 with tf.variable_scope("attention"+str(i)):
-                    attn_feats[i], attn_dist, coverage = self.attention_fn(
+                    attn_feats[i], attn_logits, coverage = self.attention_fn(
                         query,
                         keys[i],
                         values[i],
@@ -468,17 +504,11 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                         coverages[i],
                         is_training=self.is_training)
                 if self.use_copy[i]:
-                    with tf.variable_scope("copy"+str(i)):
-                        copy_logits.append(fully_connected(
-                            tf.concat([cell_outputs, attn_feats[i]], axis=-1),
-                            1,
-                            is_training=self.is_training,
-                            scope="copy_logit"))
-                    copy_dists.append(attn_dist)
-            outputs = [tf.concat([cell_outputs,] +  attn_feats, 1),]
+                    copy_logits.append(attn_logits)
+            outputs = [tf.concat([cell_outputs,] + attn_feats, 1),]
             outputs = tuple(
-                outputs + [tf.concat(copy_logits, axis=-1), tuple(copy_dists)]
-                if len(copy_dists) > 0 else outputs[0])
+                outputs + [tuple(copy_logits),]
+                if len(copy_logits) > 0 else outputs[0])
             cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
             state = []
             for i in xrange(self.num_attention):
@@ -874,10 +904,8 @@ def make_logit_fn(vocab_embedding,
             batch_size = tf.shape(copy_ids[0])[0]
             size = vocab_embedding.get_shape()[-1].value
             vocab_size = vocab_embedding.get_shape()[0].value
-            outputs, copy_logits, copy_dists = outputs
-            copy_logits = tf.unstack(tf.nn.relu(copy_logits), axis=-1)
-            assert(len(copy_ids) == len(copy_dists) and
-                   len(copy_ids) == len(copy_logits))
+            outputs, copy_logits = outputs
+            assert(len(copy_ids) == len(copy_logits))
             outputs_vocab = fully_connected(outputs,
                                            size+16,
                                            is_training=is_training,
@@ -912,8 +940,7 @@ def make_logit_fn(vocab_embedding,
             logits = logits_vocab
             for i in xrange(len(copy_ids)):
                 length = copy_ids[i].get_shape()[1].value
-                data = tf.reshape(copy_dists[i], [batch_size, beam_size, length])
-                data *= tf.reshape(copy_logits[i], [batch_size, beam_size, 1])
+                data = tf.reshape(copy_logits[i], [batch_size, beam_size, length])
                 batch_idx = tf.tile(
                     tf.expand_dims(tf.expand_dims(tf.range(batch_size), 1), 2),
                     [1, beam_size, length])
@@ -929,5 +956,51 @@ def make_logit_fn(vocab_embedding,
                 logits = tf.reshape(logits, [-1, vocab_size])
             return logits
     return logit_fn
+
+# Capsule
+
+def dynamic_route(query,
+                   keys,
+                   values,
+                   masks,
+                   coverage=None,
+                   size=None,
+                   is_training=True):
+    """dynamic route lower layer inputs
+
+    query: [batch_size x dim]
+    keys: [batch_size x length x dim]
+    values: [batch_size x length x dim]
+    """
+
+    if query.get_shape().ndims == 2:
+        querys = tf.expand_dims(query, 1)
+    else:
+        querys = query
+    if size == None:
+        size = querys.get_shape()[-1].value
+    num = querys.get_shape()[1].value
+    querys = tf.expand_dims(querys, 2)
+    keys = tf.expand_dims(keys, 1)
+    votes = fully_connected(tf.nn.relu(querys + keys),
+                            size,
+                            is_training=is_training,
+                            scope='votes')
+    attn_feat = tf.zeros(tf.concat([tf.shape(querys)[:2], tf.constant([size])], 0))
+    masks = tf.tile(tf.expand_dims(masks, 1), [1, num, 1])
+    for _ in xrange(3):
+        attn_feat = tf.expand_dims(attn_feat, 3)
+        logits = tf.squeeze(tf.matmul(votes, attn_feat), axis=-1)
+        probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
+        attn_dist = probs / tf.reduce_sum(probs, -1, keep_dims=True)
+        attn_feat = tf.reduce_sum(tf.expand_dims(attn_dist, -1) * votes, [2])
+    if query.get_shape().ndims == 2:
+        attn_feat = tf.squeeze(attn_feat, 1)
+        attn_dist = tf.squeeze(attn_dist, 1)
+    if coverage != None:
+        coverage += attn_dist
+        return attn_feat, attn_dist, coverage
+    else:
+        return attn_feat, attn_dist, None
 
 
