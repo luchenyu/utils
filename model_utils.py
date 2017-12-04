@@ -224,7 +224,7 @@ def ResDNN(inputs,
         outputs = inputs
 
         # residual layers
-        for i in xrange(num_layers):
+        for i in range(num_layers):
             outputs -= fully_connected(activation_fn(outputs),
                                        size,
                                        decay=decay,
@@ -258,7 +258,7 @@ def ResCNN(inputs,
         outputs = inputs
 
         # residual layers
-        for j in xrange(pool_layers+1):
+        for j in range(pool_layers+1):
             if j > 0:
                 pool_shape = [1] + list(pool_size) + [1]
                 inputs = tf.nn.max_pool(outputs,
@@ -267,7 +267,7 @@ def ResCNN(inputs,
                                         padding='SAME')
                 outputs = inputs
             with tf.variable_scope("layer{0}".format(j)) as sc:
-                for i in xrange(num_layers):
+                for i in range(num_layers):
                     outputs -= convolution2d(activation_fn(outputs),
                                              size,
                                              kernel_size,
@@ -401,7 +401,7 @@ def dynamic_attention(query,
         axis=-1)
     attn_logits = tf.nn.relu(tf.squeeze(attn_logits, axis=-1))
     attn_logits = tf.where(masks, attn_logits, tf.zeros(tf.shape(attn_logits)))
-    for _ in xrange(3):
+    for _ in range(3):
         attn_feat = tf.expand_dims(attn_feat, 2)
         logits = tf.squeeze(tf.matmul(votes, attn_feat), axis=-1)
         probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
@@ -444,7 +444,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
             masks = []
             attn_feats = []
             coverages = []
-            for i in xrange(self.num_attention):
+            for i in range(self.num_attention):
                 keys.append(state[0])
                 values.append(state[1])
                 masks.append(state[2])
@@ -484,7 +484,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
 
             # attend
             key_sizes = []
-            for i in xrange(self.num_attention):
+            for i in range(self.num_attention):
                 key_sizes.append(keys[i].get_shape()[-1].value)
             query_all = fully_connected(
                 tf.concat([cell_outputs,] + attn_feats, axis=-1),
@@ -493,10 +493,10 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                 scope="query_proj")
             queries = tf.split(query_all, key_sizes, axis=-1)
             copy_logits = []
-            for i in xrange(self.num_attention):
+            for i in range(self.num_attention):
                 query = queries[i]
                 with tf.variable_scope("attention"+str(i)):
-                    attn_feats[i], attn_logits, coverage = self.attention_fn(
+                    attn_feats[i], attn_logits, coverages[i] = self.attention_fn(
                         query,
                         keys[i],
                         values[i],
@@ -511,13 +511,29 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                 if len(copy_logits) > 0 else outputs[0])
             cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
             state = []
-            for i in xrange(self.num_attention):
+            for i in range(self.num_attention):
                 if self.use_coverage[i]:
                     state.extend([keys[i], values[i], masks[i], attn_feats[i], coverages[i]])
                 else:
                     state.extend([keys[i], values[i], masks[i], attn_feats[i]])
             state = tuple(state) + cell_state
             return outputs, state
+
+    def get_coverage_penalty(self, state):
+        """ get the coverage from state """
+        cov_penalties = []
+        for i in range(self.num_attention):
+            if self.use_coverage[i]:
+                mask = tf.to_float(state[2])
+                coverage = state[4]
+                cov_penalty = tf.reduce_sum(
+                    tf.log(tf.minimum(coverage+1e-5, 1.0)) * mask,
+                    axis=-1) / tf.reduce_sum(mask, axis=-1)
+                cov_penalties.append(cov_penalty)
+                state = state[5:]
+            else:
+                state = state[4:]
+        return cov_penalties
 
 
 def create_cell(size,
@@ -579,7 +595,7 @@ def greedy_dec(length,
     seq = [symbol]
     mask = tf.not_equal(symbol, 0)
     tf.get_variable_scope().reuse_variables()
-    for _ in xrange(length-1):
+    for _ in range(length-1):
 
         inputs = tf.nn.embedding_lookup(input_embedding, symbol)
 
@@ -627,7 +643,7 @@ def stochastic_dec(length,
     else:
         state = tf.gather(state, beam_parents)
 
-    for _ in xrange(length-1):
+    for _ in range(length-1):
 
         inputs = tf.nn.embedding_lookup(input_embedding, symbol)
 
@@ -683,7 +699,7 @@ def beam_dec(length,
 
     tf.get_variable_scope().reuse_variables()
 
-    for i in xrange(length-1):
+    for i in range(length-1):
 
         if isinstance(state, tuple):
             state = tuple([tf.gather(s, beam_parent) for s in state])
@@ -758,7 +774,8 @@ def stochastic_beam_dec(length,
                         logit_fn,
                         num_candidates=1,
                         beam_size=100,
-                        gamma=0.65):
+                        gamma=0.65,
+                        cp=0.0):
     """ A stochastic beam decoder
 
     """
@@ -795,7 +812,7 @@ def stochastic_beam_dec(length,
 
     tf.get_variable_scope().reuse_variables()
 
-    for i in xrange(length-1):
+    for i in range(length-1):
 
         if isinstance(state, tuple):
             state = tuple([tf.gather(s, beam_parent) for s in state])
@@ -834,6 +851,14 @@ def stochastic_beam_dec(length,
             [batch_size, beam_size])
         close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
             tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
+        if cp > 0.0:
+            cov_penalties = cell.get_coverage_penalty(state)
+            cov_penalty = tf.reduce_sum(
+                tf.stack(
+                    cov_penalties,
+                    axis=-1),
+                axis=-1)
+            close_score += tf.reshape(cp*cov_penalty, [batch_size, beam_size])
         candidates.append(tf.reshape(tf.pad(paths,
                                             [[0, 0],[0, length-1-i]],
                                             "CONSTANT"),
@@ -938,7 +963,7 @@ def make_logit_fn(vocab_embedding,
                     [batch_size, -1, vocab_size])
             beam_size = tf.shape(logits_vocab)[1]
             logits = logits_vocab
-            for i in xrange(len(copy_ids)):
+            for i in range(len(copy_ids)):
                 length = copy_ids[i].get_shape()[1].value
                 data = tf.reshape(copy_logits[i], [batch_size, beam_size, length])
                 batch_idx = tf.tile(
@@ -988,7 +1013,7 @@ def dynamic_route(query,
                             scope='votes')
     attn_feat = tf.zeros(tf.concat([tf.shape(querys)[:2], tf.constant([size])], 0))
     masks = tf.tile(tf.expand_dims(masks, 1), [1, num, 1])
-    for _ in xrange(3):
+    for _ in range(3):
         attn_feat = tf.expand_dims(attn_feat, 3)
         logits = tf.squeeze(tf.matmul(votes, attn_feat), axis=-1)
         probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
