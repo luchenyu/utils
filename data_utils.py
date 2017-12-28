@@ -73,8 +73,10 @@ class Vocab(object):
     def sentence_to_token_ids(self, text):
         """encode a sentence in plain text into a sequence of token ids
         """
-        text = text.strip()
-        seq = [self.key2idx(key.encode('utf8')) for key in list(text.decode('utf8'))]
+        if not type(text) is list:
+            text = text.strip()
+            text = map(lambda i: i.encode('utf-8'), list(text.decode('utf-8')))
+        seq = [self.key2idx(key) for key in text]
         seq = [idx if idx else self.key2idx("_UNK") for idx in seq]
         return seq
 
