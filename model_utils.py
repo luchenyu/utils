@@ -52,7 +52,6 @@ def fully_connected(inputs,
             shape=weights_shape,
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
-            collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
         weights_norm = tf.contrib.framework.model_variable(
             'weights_norm',
@@ -74,26 +73,15 @@ def fully_connected(inputs,
             # Reshape inputs
             inputs = tf.reshape(inputs, [-1, num_input_units])
 
-        if dropout != None and is_training:
-            inputs = tf.nn.dropout(inputs, dropout)
+        if dropout != None:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
 
         outputs = tf.matmul(inputs, weights) * tf.exp(weights_norm)
-        moving_mean = tf.contrib.framework.model_variable(
-            'moving_mean',
-            shape=[num_outputs,],
-            dtype=dtype,
-            initializer=tf.zeros_initializer(),
-            trainable=False)
 
-        if is_training:
-            # Calculate the moments based on the individual batch.
-            mean, _ = tf.nn.moments(outputs, [0], shift=moving_mean)
-            # Update the moving_mean moments.
-            update_moving_mean = tf.assign_sub(moving_mean, (moving_mean - mean) * (1.0 - decay))
-            #tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, update_moving_mean)
-            outputs = outputs + biases
-        else:
-            outputs = outputs + biases
+        outputs = outputs + biases
 
         if activation_fn:
             outputs = activation_fn(outputs)
@@ -131,7 +119,6 @@ def convolution2d(inputs,
             shape=weights_shape,
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
-            collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
         weights_norm = tf.contrib.framework.model_variable(
             'weights_norm',
@@ -151,29 +138,16 @@ def convolution2d(inputs,
             collections=tf.GraphKeys.BIASES,
             trainable=True)
 
-        if dropout != None and is_training:
-            inputs = tf.nn.dropout(inputs, dropout)
+        if dropout != None:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
 
         outputs = tf.nn.conv2d(
             inputs, weights, [1,1,1,1], padding='SAME') * tf.exp(weights_norm)
-        moving_mean = tf.contrib.framework.model_variable(
-            'moving_mean',
-            shape=[num_outputs,],
-            dtype=dtype,
-            initializer=tf.zeros_initializer(),
-            trainable=False)
 
-        if is_training:
-            # Calculate the moments based on the individual batch.
-            mean, _ = tf.nn.moments(outputs, [0, 1, 2], shift=moving_mean)
-            # Update the moving_mean moments.
-            update_moving_mean = tf.assign_sub(
-                moving_mean,
-                (moving_mean - mean) * (1.0 - decay))
-            #tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, update_moving_mean)
-            outputs = outputs + biases
-        else:
-            outputs = outputs + biases
+        outputs = outputs + biases
 
         if pool_size:
             pool_shape = [1] + list(pool_size) + [1]
@@ -221,16 +195,25 @@ def ResDNN(inputs,
                            [inputs],
                            reuse=reuse) as sc:
         size = inputs.get_shape()[-1].value
-        outputs = inputs
+        if dropout == None:
+            outputs = inputs
+        else:
+            outputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
 
         # residual layers
+        ru = None
         for i in range(num_layers):
             outputs -= fully_connected(activation_fn(outputs),
                                        size,
                                        decay=decay,
                                        activation_fn=activation_fn,
-                                       dropout=dropout,
-                                       is_training=is_training)
+                                       is_training=is_training,
+                                       reuse=ru,
+                                       scope=sc)
+            ru = True
         return outputs
 
 def ResCNN(inputs,
@@ -255,7 +238,13 @@ def ResCNN(inputs,
         size = inputs.get_shape()[-1].value
         if not pool_size:
             pool_layers = 0
-        outputs = inputs
+        if dropout == None:
+            outputs = inputs
+        else:
+            outputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
 
         # residual layers
         for j in range(pool_layers+1):
@@ -265,16 +254,78 @@ def ResCNN(inputs,
                                         pool_shape,
                                         pool_shape,
                                         padding='SAME')
-                outputs = inputs
+                if dropout == None:
+                    outputs = inputs
+                else:
+                    outputs = tf.cond(
+                        tf.cast(is_training, tf.bool),
+                        lambda: tf.nn.dropout(inputs, dropout),
+                        lambda: inputs)
             with tf.variable_scope("layer{0}".format(j)) as sc:
+                ru = None
                 for i in range(num_layers):
                     outputs -= convolution2d(activation_fn(outputs),
                                              size,
                                              kernel_size,
                                              decay=decay,
                                              activation_fn=activation_fn,
+                                             is_training=is_training,
+                                             reuse=ru,
+                                             scope=sc)
+                    ru = True
+        return outputs
+
+def ResCNN2(inputs,
+            num_layers,
+            kernel_size,
+            pool_size,
+            pool_layers=1,
+            decay=0.99999,
+            activation_fn=tf.nn.relu,
+            dropout=None,
+            is_training=True,
+            reuse=None,
+            scope=None):
+    """ a convolutaional neural net with conv2d and max_pool layers
+
+    """
+
+    with tf.variable_scope(scope,
+                           "ResCNN",
+                           [inputs],
+                           reuse=reuse) as sc:
+        size = inputs.get_shape()[-1].value
+        if not pool_size:
+            pool_layers = 0
+        if dropout == None:
+            outputs = inputs
+        else:
+            outputs = tf.nn.dropout(inputs, dropout)
+
+        # residual layers
+        for j in range(pool_layers+1):
+            if j > 0:
+                pool_shape = [1] + list(pool_size) + [1]
+                inputs = tf.nn.max_pool(outputs,
+                                        pool_shape,
+                                        pool_shape,
+                                        padding='SAME')
+                if dropout == None:
+                    outputs = inputs
+                else:
+                    outputs = tf.nn.dropout(inputs, dropout)
+            with tf.variable_scope("layer{0}".format(j)) as sc:
+                inputs = outputs
+                for i in range(num_layers):
+                    inputs = convolution2d(activation_fn(inputs),
+                                             size,
+                                             kernel_size,
+                                             decay=decay,
+                                             activation_fn=None,
                                              dropout=dropout,
-                                             is_training=is_training)
+                                             is_training=is_training,
+                                             scope="cnn"+str(i))
+                outputs = activation_fn(outputs+inputs)
         return outputs
 
 
@@ -381,6 +432,7 @@ def dynamic_attention(query,
                       values,
                       masks,
                       coverage=None,
+                      size=None,
                       is_training=True):
     """dynamic attend on lower layer inputs
 
@@ -389,9 +441,18 @@ def dynamic_attention(query,
     values: [batch_size x length x dim]
     """
 
-    size = query.get_shape()[1].value
-    attn_feat = tf.zeros(tf.shape(query))
-    query = tf.expand_dims(query, 1)
+    if size == None:
+        size = values.get_shape()[-1].value
+    single_query = False
+    if len(query.get_shape()) == 2:
+        single_query = True
+        query = tf.expand_dims(query, 1)
+    attn_feat = tf.zeros(tf.concat([tf.shape(query)[:-1], [size,]], 0))
+    num_querys = tf.shape(query)[1]
+    query = tf.expand_dims(query, 2)
+    keys = tf.expand_dims(keys, 1)
+    values = tf.expand_dims(values, 1)
+    masks = tf.tile(tf.expand_dims(masks, 1), [1, num_querys, 1])
     attn_logits, votes = tf.split(
         fully_connected(tf.nn.relu(query + keys),
                         size+1,
@@ -402,11 +463,15 @@ def dynamic_attention(query,
     attn_logits = tf.nn.relu(tf.squeeze(attn_logits, axis=-1))
     attn_logits = tf.where(masks, attn_logits, tf.zeros(tf.shape(attn_logits)))
     for _ in range(3):
-        attn_feat = tf.expand_dims(attn_feat, 2)
+        attn_feat = tf.expand_dims(attn_feat, 3)
         logits = tf.squeeze(tf.matmul(votes, attn_feat), axis=-1)
         probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
         probs = probs / tf.reduce_sum(probs, -1, keep_dims=True)
-        attn_feat = tf.reduce_sum(tf.expand_dims(probs, 2) * votes, [1])
+        attn_feat = tf.reduce_sum(tf.expand_dims(probs, 3) * votes, [2])
+    if single_query:
+        attn_feat = tf.squeeze(attn_feat, 1)
+        attn_logits = tf.squeeze(attn_logits, 1)
+        probs = tf.squeeze(probs, 1)
     if coverage != None:
         coverage += probs
         return attn_feat, attn_logits, coverage
