@@ -105,7 +105,7 @@ class FastWord2vec(object):
             # also save the vocab
             with open(path + ".vocab", "wt") as fout:
                 for word in word2vec.index2word:
-                    fout.write(word + "\n")
+                    fout.write(word.encode('utf-8') + "\n")
 
         self.syn0 = np.load(path + ".npy", mmap_mode="r")
         self.index2word = [l.strip("\n") for l in open(path + ".vocab", "rt")]
