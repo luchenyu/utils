@@ -178,6 +178,46 @@ def params_decay(decay):
 
 ### Nets ###
 
+def MLP(inputs,
+        num_layers,
+        hidden_size,
+        output_size,
+        activation_fn=tf.nn.relu,
+        dropout=None,
+        is_training=True,
+        reuse=None,
+        scope=None):
+    """ a deep neural net with fully connected layers
+
+    """
+
+    with tf.variable_scope(scope,
+                           "MLP",
+                           [inputs],
+                           reuse=reuse) as sc:
+        size = inputs.get_shape()[-1].value
+        if dropout == None:
+            outputs = inputs
+        else:
+            outputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+
+        # residual layers
+        for i in range(num_layers-1):
+            outputs = fully_connected(outputs,
+                                      hidden_size,
+                                      activation_fn=activation_fn,
+                                      is_training=is_training,
+                                      scope="layer"+str(i))
+        outputs = fully_connected(outputs,
+                                   output_size,
+                                   activation_fn=activation_fn,
+                                   is_training=is_training,
+                                   scope="layer"+str(num_layers-1))
+        return outputs
+
 def ResDNN(inputs,
            num_layers,
            decay=0.99999,
