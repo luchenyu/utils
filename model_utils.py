@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 import numpy as np
+import math
 import tensorflow as tf
 from tensorflow.python.util import nest
 
@@ -61,6 +62,7 @@ def fully_connected(inputs,
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
         weights = tf.nn.l2_normalize(weights, 0)
+        weights_norm = tf.exp(weights_norm)
         biases = tf.contrib.framework.model_variable(
             'biases',
             shape=[num_outputs,],
@@ -79,7 +81,7 @@ def fully_connected(inputs,
                 lambda: tf.nn.dropout(inputs, dropout),
                 lambda: inputs)
 
-        outputs = tf.matmul(inputs, weights) * tf.exp(weights_norm)
+        outputs = tf.matmul(inputs, weights) * weights_norm
 
         outputs = outputs + biases
 
@@ -94,10 +96,9 @@ def fully_connected(inputs,
 
 # convolutional layer
 def convolution2d(inputs,
-                  num_outputs,
-                  kernel_size,
+                  output_sizes,
+                  kernel_sizes,
                   pool_size=None,
-                  decay=0.999,
                   activation_fn=None,
                   dropout=None,
                   is_training=True,
@@ -113,41 +114,54 @@ def convolution2d(inputs,
                            reuse=reuse) as sc:
         dtype = inputs.dtype.base_dtype
         num_filters_in = inputs.get_shape()[-1].value
-        weights_shape = list(kernel_size) + [num_filters_in, num_outputs]
-        weights = tf.contrib.framework.model_variable(
-            name='weights',
-            shape=weights_shape,
-            dtype=dtype,
-            initializer=tf.contrib.layers.xavier_initializer(),
-            trainable=True)
-        weights_norm = tf.contrib.framework.model_variable(
-            'weights_norm',
-            shape=[num_outputs,],
-            dtype=dtype,
-            initializer=tf.contrib.layers.xavier_initializer(),
-            collections=tf.GraphKeys.WEIGHTS,
-            trainable=True)
-        weights = tf.nn.l2_normalize(
-            tf.reshape(weights, [-1, num_outputs]), 0)
-        weights = tf.reshape(weights, weights_shape)
-        biases = tf.contrib.framework.model_variable(
-            name='biases',
-            shape=[num_outputs,],
-            dtype=dtype,
-            initializer=tf.zeros_initializer(),
-            collections=tf.GraphKeys.BIASES,
-            trainable=True)
-
+        if type(output_sizes) == int:
+            output_sizes = [output_sizes]
+            kernel_sizes = [kernel_sizes]
+        assert(len(output_sizes) == len(kernel_sizes))
         if dropout != None:
             inputs = tf.cond(
                 tf.cast(is_training, tf.bool),
                 lambda: tf.nn.dropout(inputs, dropout),
                 lambda: inputs)
+        output_list = []
+        for i in range(len(output_sizes)):
+            with tf.variable_scope("conv"+str(i)):
+                kernel_size = kernel_sizes[i]
+                output_size = output_sizes[i]
+                weights_shape = list(kernel_size) + [num_filters_in, output_size]
+                weights = tf.contrib.framework.model_variable(
+                    name='weights',
+                    shape=weights_shape,
+                    dtype=dtype,
+                    initializer=tf.contrib.layers.xavier_initializer(),
+                    trainable=True)
+                weights_norm = tf.contrib.framework.model_variable(
+                    'weights_norm',
+                    shape=[output_size,],
+                    dtype=dtype,
+                    initializer=tf.contrib.layers.xavier_initializer(),
+                    collections=tf.GraphKeys.WEIGHTS,
+                    trainable=True)
+                weights = tf.nn.l2_normalize(
+                    tf.reshape(weights, [-1, output_size]), 0)
+                weights = tf.reshape(weights, weights_shape)
+                weights_norm = tf.exp(weights_norm)
+                biases = tf.contrib.framework.model_variable(
+                    name='biases',
+                    shape=[output_size,],
+                    dtype=dtype,
+                    initializer=tf.zeros_initializer(),
+                    collections=tf.GraphKeys.BIASES,
+                    trainable=True)
+                outputs = tf.nn.conv2d(
+                    inputs, weights, [1,1,1,1], padding='SAME') * weights_norm
+                outputs = outputs + biases
+                output_list.append(outputs)
 
-        outputs = tf.nn.conv2d(
-            inputs, weights, [1,1,1,1], padding='SAME') * tf.exp(weights_norm)
-
-        outputs = outputs + biases
+        if len(output_list) == 1:
+            outputs = output_list[0]
+        else:
+            outputs = tf.concat(output_list, axis=-1)
 
         if pool_size:
             pool_shape = [1] + list(pool_size) + [1]
@@ -213,14 +227,49 @@ def MLP(inputs,
                                       scope="layer"+str(i))
         outputs = fully_connected(outputs,
                                    output_size,
-                                   activation_fn=activation_fn,
                                    is_training=is_training,
                                    scope="layer"+str(num_layers-1))
         return outputs
 
 def ResDNN(inputs,
            num_layers,
-           decay=0.99999,
+           hidden_size,
+           activation_fn=tf.nn.relu,
+           dropout=None,
+           is_training=True,
+           reuse=None,
+           scope=None):
+    """ a deep neural net with fully connected layers
+
+    """
+
+    with tf.variable_scope(scope,
+                           "ResDNN",
+                           [inputs],
+                           reuse=reuse) as sc:
+        if dropout == None:
+            inputs = inputs
+        else:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+
+        size = inputs.get_shape()[-1].value
+        outputs = inputs
+        # residual layers
+        for i in range(num_layers):
+            outputs += MLP(outputs,
+                           2,
+                           hidden_size,
+                           size,
+                           is_training=is_training,
+                           scope="mlp")
+            outputs += update
+        return outputs
+
+def SIRDNN(inputs,
+           num_layers,
            activation_fn=tf.nn.relu,
            dropout=None,
            is_training=True,
@@ -256,12 +305,11 @@ def ResDNN(inputs,
             ru = True
         return outputs
 
-def ResCNN(inputs,
+def SIRCNN(inputs,
            num_layers,
-           kernel_size,
+           kernel_sizes,
            pool_size,
            pool_layers=1,
-           decay=0.99999,
            activation_fn=tf.nn.relu,
            dropout=None,
            is_training=True,
@@ -304,18 +352,19 @@ def ResCNN(inputs,
             with tf.variable_scope("layer{0}".format(j)) as sc:
                 ru = None
                 for i in range(num_layers):
-                    outputs -= convolution2d(activation_fn(outputs),
-                                             size,
-                                             kernel_size,
-                                             decay=decay,
-                                             activation_fn=activation_fn,
-                                             is_training=is_training,
-                                             reuse=ru,
-                                             scope=sc)
+                    inputs = outputs
+                    for k, kernel_size in enumerate(kernel_sizes):
+                        outputs -= convolution2d(activation_fn(inputs),
+                                                 size,
+                                                 kernel_size,
+                                                 activation_fn=activation_fn,
+                                                 is_training=is_training,
+                                                 reuse=ru,
+                                                 scope="k"+str(k))
                     ru = True
         return outputs
 
-def ResCNN2(inputs,
+def ResCNN(inputs,
             num_layers,
             kernel_size,
             pool_size,
@@ -360,7 +409,6 @@ def ResCNN2(inputs,
                     inputs = convolution2d(activation_fn(inputs),
                                              size,
                                              kernel_size,
-                                             decay=decay,
                                              activation_fn=None,
                                              dropout=dropout,
                                              is_training=is_training,
@@ -368,6 +416,54 @@ def ResCNN2(inputs,
                 outputs = activation_fn(outputs+inputs)
         return outputs
 
+def DGCNN(inputs,
+          num_layers,
+          kernel_sizes,
+          activation_fn=None,
+          dropout=None,
+          is_training=True,
+          reuse=None,
+          scope=None):
+    """ a convolutaional neural net with conv2d and max_pool layers
+
+    """
+
+    with tf.variable_scope(scope,
+                           "ResCNN",
+                           [inputs],
+                           reuse=reuse) as sc:
+        size = inputs.get_shape()[-1].value
+        if dropout == None:
+            inputs = inputs
+        else:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+
+        # residual layers
+        ru = None
+        for i in range(num_layers):
+            gates = [tf.expand_dims(tf.zeros(tf.shape(inputs)[:-1]), axis=-1),]
+            updates = [tf.zeros(tf.shape(inputs)),]
+            if activation_fn != None:
+                inputs = activation_fn(inputs)
+            for k, kernel_size in enumerate(kernel_sizes):
+                temp = convolution2d(inputs,
+                                     size+1,
+                                     kernel_size,
+                                     activation_fn=None,
+                                     is_training=is_training,
+                                     reuse=ru,
+                                     scope="k"+str(k))
+                gate, update = tf.split(temp, [1, size], axis=-1)
+                gates.append(gate)
+                updates.append(update)
+            gates = tf.nn.softmax(tf.stack(gates, axis=-1))
+            updates = tf.stack(updates, axis=-1)
+            inputs = tf.reduce_sum(gates*updates, axis=-1)
+            ru = True
+        return inputs
 
 ### RNN ###
 class GRUCell(tf.contrib.rnn.RNNCell):
@@ -467,6 +563,43 @@ def attention(query,
     else:
         return attn_feat, attn_dist, None
 
+def attention2(query,
+              keys,
+              values,
+              masks,
+              coverage=None,
+              is_training=True):
+    """ implements the attention mechanism
+
+    query: [batch_size x dim]
+    keys: [batch_size x length x dim]
+    values: [batch_size x length x dim]
+    """
+
+    query = tf.expand_dims(query, 1)
+    if coverage != None:
+        c = tf.expand_dims(tf.expand_dims(coverage, 1), 3)
+        size = query.get_shape()[-1].value
+        feat = query + keys + tf.squeeze(
+            convolution2d(c,
+                          size,
+                          [1, 5],
+                          is_training=is_training,
+                          scope="coverage"),
+            axis=[1])
+    else:
+        feat = query + keys
+    logits = fully_connected(
+        tf.tanh(feat), 1, is_training=is_training, scope="attention")
+    logits = tf.squeeze(logits, [2])
+    gates = tf.where(masks, tf.sigmoid(logits), tf.ones(tf.shape(logits)))
+    attn_feat = tf.reduce_max(tf.expand_dims(gates, 2) * values, [1])
+    if coverage != None:
+        coverage += gates
+        return attn_feat, gates, coverage
+    else:
+        return attn_feat, gates, None
+
 def dynamic_attention(query,
                       keys,
                       values,
@@ -517,6 +650,357 @@ def dynamic_attention(query,
         return attn_feat, attn_logits, coverage
     else:
         return attn_feat, attn_logits, None
+
+def dynamic_route(num_outputs,
+                  values,
+                  masks,
+                  size=None,
+                  is_training=True):
+    """dynamic attend on lower layer inputs
+
+    query: [batch_size x dim]
+    keys: [batch_size x length x dim]
+    values: [batch_size x length x dim]
+    """
+
+    def squash(inputs):
+        """squash the inputs into 0-1"""
+        norm = tf.norm(inputs, axis=-1, keep_dims=True)
+        outputs = norm / (tf.reduce_max(norm, axis=1, keep_dims=True)+1.0) * tf.nn.l2_normalize(inputs, -1)
+        return outputs
+
+    if size == None:
+        size = values.get_shape()[-1].value
+    seq_len = tf.expand_dims(tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True), -1)
+    masks = tf.tile(tf.expand_dims(masks, 1), [1, num_outputs, 1])
+    votes = MLP(tf.nn.relu(values),
+                2,
+                512,
+                num_outputs*size,
+                is_training=is_training,
+                scope='votes')
+    votes = tf.reshape(votes,
+                       tf.concat([tf.shape(values)[:2], [num_outputs, size]], 0))
+    votes = tf.transpose(votes, [0, 2, 1, 3])
+    logits = tf.zeros(tf.stack([tf.shape(values)[0], num_outputs, tf.shape(values)[1]], 0))
+    probs = tf.where(masks, tf.nn.softmax(logits, 1), tf.zeros(tf.shape(logits)))
+    cap_num = tf.reduce_sum(probs, 2, keep_dims=True)
+    cap_feat = tf.reduce_sum(tf.expand_dims(probs, 3)*votes, 2)
+
+    def cond(cap_feat, cap_num, open_mask):
+        return tf.reduce_any(open_mask)
+
+    def body(cap_feat, cap_num, open_mask):
+        cap_feat = tf.expand_dims(cap_feat, 3)
+        logits = tf.squeeze(tf.matmul(votes, tf.nn.l2_normalize(cap_feat, 2)), 3)
+        probs = tf.where(masks, tf.nn.softmax(logits, 1), tf.zeros(tf.shape(logits)))
+        cap_num = tf.reduce_sum(probs, 2, keep_dims=True)
+        new_cap_feat = tf.reduce_sum(tf.expand_dims(probs, 3)*votes, 2)
+        cap_feat = tf.squeeze(cap_feat, 3)
+        update = new_cap_feat - cap_feat
+        open_mask = tf.greater(
+            tf.reduce_max(
+                tf.norm(update, axis=-1)/(tf.norm(cap_feat, axis=-1)+1e-12),
+                axis=-1),
+            1e-1)
+        cap_feat = tf.where(open_mask, cap_feat+0.5*(new_cap_feat-cap_feat), cap_feat)
+        return cap_feat, cap_num, open_mask
+    cap_feat, cap_num, _ = tf.while_loop(cond,
+                                   body,
+                                   [cap_feat, cap_num, tf.ones([tf.shape(cap_feat)[0]], dtype=tf.bool)])
+    return squash(cap_feat)
+
+def dynamic_route2(num_outputs,
+                   input_poses,
+                   input_activations,
+                   masks,
+                   size=None,
+                   is_training=True):
+    """dynamic attend on lower layer inputs
+
+    query: [batch_size x dim]
+    keys: [batch_size x length x dim]
+    values: [batch_size x length x dim]
+    """
+    with tf.variable_scope("dynamic_route") as sc:
+
+        beta1 = tf.contrib.framework.model_variable(
+            'beta1',
+            shape=[num_outputs,],
+            dtype=tf.float32,
+            initializer=tf.contrib.layers.xavier_initializer(),
+            collections=tf.GraphKeys.BIASES,
+            trainable=True)
+
+        beta2 = tf.contrib.framework.model_variable(
+            'beta2',
+            shape=[num_outputs,],
+            dtype=tf.float32,
+            initializer=tf.contrib.layers.xavier_initializer(),
+            collections=tf.GraphKeys.BIASES,
+            trainable=True)
+
+        if size == None:
+             size = input_poses.get_shape()[-1].value
+        seq_len = tf.expand_dims(tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True), -1)
+        masks = tf.tile(tf.expand_dims(masks, 1), [1, num_outputs, 1])
+        votes = MLP(input_poses,
+                    2,
+                    512,
+                    num_outputs*size,
+                    is_training=is_training,
+                    scope='poses')
+        votes = tf.reshape(votes,
+                           tf.concat([tf.shape(input_poses)[:2], [num_outputs, size]], 0))
+        votes = tf.transpose(votes, [0, 2, 1, 3])
+        input_activations = tf.expand_dims(input_activations, 1)
+        r = tf.ones(tf.stack([tf.shape(input_poses)[0], num_outputs, tf.shape(input_poses)[1]], 0))
+        r /= tf.reduce_sum(r, axis=1, keep_dims=True)
+        r = tf.where(masks, r, tf.zeros(tf.shape(r)))
+        r *= input_activations
+        r_sum = tf.reduce_sum(r, 2, keep_dims=True)
+        output_poses = tf.reduce_sum(tf.expand_dims(r, 3)*votes, 2) / (r_sum+1e-12)
+        output_vars = tf.reduce_sum(tf.expand_dims(r, 3)*tf.square(votes-tf.expand_dims(output_poses, 2)), 2) / (r_sum+1e-12)
+        cost = tf.reduce_sum(tf.expand_dims(beta1, -1)+0.5*tf.log(output_vars+1e-12), axis=-1) * tf.squeeze(r_sum, 2)
+        cost_mean = tf.reduce_mean(cost, axis=1, keep_dims=True)
+        cost_stdv = tf.sqrt(tf.reduce_sum(tf.square(cost - cost_mean), axis=1, keep_dims=True) / num_outputs)
+        output_activations = tf.sigmoid(beta2 + (cost_mean - cost) / (cost_stdv + 1e-12))
+        output_activations = tf.sigmoid(tf.squeeze(r_sum, -1))
+        sc.reuse_variables()
+
+        def cond(output_poses, output_vars, output_activations, open_mask):
+            return tf.reduce_any(open_mask)
+
+        def body(output_poses, output_vars, output_activations, open_mask):
+            probs = 1/tf.sqrt(tf.reduce_prod(2*math.pi*tf.expand_dims(output_vars, 2), axis=-1))*\
+                tf.exp(tf.reduce_sum(-0.5*tf.square(votes-tf.expand_dims(output_poses, 2))/tf.expand_dims(output_vars, 2), axis=-1))
+            r = probs * tf.expand_dims(output_activations, 2)
+            r /= (tf.reduce_sum(r, axis=1, keep_dims=True)+1e-12)
+            r = tf.where(masks, r, tf.zeros(tf.shape(r)))
+            r *= input_activations
+            r_sum = tf.reduce_sum(r, 2, keep_dims=True)
+            new_output_poses = tf.reduce_sum(tf.expand_dims(r, 3)*votes, 2) / (r_sum+1e-12)
+            new_output_vars = tf.reduce_sum(tf.expand_dims(r, 3)*tf.square(votes-tf.expand_dims(new_output_poses, 2)), 2) / (r_sum+1e-12)
+            cost = (beta1 + tf.reduce_sum(0.5*tf.log(new_output_vars+1e-12), axis=-1)) * tf.squeeze(r_sum, 2)
+            cost_mean = tf.reduce_mean(cost, axis=1, keep_dims=True)
+            cost_stdv = tf.sqrt(tf.reduce_sum(tf.square(cost - cost_mean), axis=1, keep_dims=True) / num_outputs)
+            new_output_activations = tf.sigmoid(beta2 + (cost_mean - cost) / (cost_stdv + 1e-12))
+            update = new_output_poses - output_poses
+            open_mask = tf.greater(
+                tf.reduce_max(
+                    tf.norm(update, axis=-1)/(tf.norm(output_poses, axis=-1)+1e-12),
+                    axis=-1),
+                1e-1)
+            output_poses = tf.where(open_mask, new_output_poses, output_poses)
+            output_vars = tf.where(open_mask, new_output_vars, output_vars)
+            output_activations = tf.where(open_mask, new_output_activations, output_activations)
+            return output_poses, output_vars, output_activations, open_mask
+
+        #output_poses, output_vars, output_activations, _= tf.while_loop(
+        #    cond,
+        #    body,
+        #    [output_poses, output_vars, output_activations, tf.ones([tf.shape(output_poses)[0]], dtype=tf.bool)])
+    return output_poses, output_activations
+
+def dynamic_route3(num_outputs,
+                   input_poses,
+                   input_activations,
+                   masks,
+                   size=None,
+                   is_training=True):
+    """dynamic attend on lower layer inputs
+
+    query: [batch_size x dim]
+    keys: [batch_size x length x dim]
+    values: [batch_size x length x dim]
+    """
+    with tf.variable_scope("dynamic_route") as sc:
+
+        beta = tf.contrib.framework.model_variable(
+            'beta',
+            shape=[num_outputs,],
+            dtype=tf.float32,
+            initializer=tf.zeros_initializer(),
+            collections=tf.GraphKeys.BIASES,
+            trainable=True)
+
+        if size == None:
+             size = input_poses.get_shape()[-1].value
+        seq_len = tf.expand_dims(tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True), -1)
+        masks = tf.tile(tf.expand_dims(masks, 1), [1, num_outputs, 1])
+        votes = MLP(input_poses,
+                    2,
+                    512,
+                    num_outputs*size,
+                    is_training=is_training,
+                    scope='votes')
+        votes = tf.reshape(votes,
+                           tf.concat([tf.shape(input_poses)[:2], [num_outputs, size]], 0))
+        votes = tf.transpose(votes, [0, 2, 1, 3])
+        input_activations = tf.expand_dims(input_activations, 1)
+        r = tf.ones(tf.stack([tf.shape(input_poses)[0], num_outputs, tf.shape(input_poses)[1]], 0))
+        r /= tf.reduce_sum(r, axis=1, keep_dims=True)
+        r = tf.where(masks, r, tf.zeros(tf.shape(r)))
+        r *= input_activations
+        r_sum = tf.reduce_sum(r, 2, keep_dims=True)
+        output_poses = tf.reduce_max(tf.expand_dims(r, 3)*tf.expand_dims(input_poses, 1), 2)
+        output_poses = fully_connected(output_poses,
+                                       size,
+                                       is_training=is_training,
+                                       scope="output_poses")
+        output_poses = tf.nn.l2_normalize(output_poses, -1)
+        output_activations = tf.reduce_sum(r*tf.squeeze(tf.matmul(votes, tf.expand_dims(output_poses, 3)), -1), axis=2)
+        output_activations = tf.sigmoid(output_activations - beta)
+
+        def cond(output_poses, output_activations, open_mask, counter):
+            return tf.logical_and(tf.reduce_any(open_mask), tf.less(counter, 5))
+
+        def body(output_poses, output_activations, open_mask, counter):
+            logits = tf.squeeze(tf.matmul(votes, tf.expand_dims(output_poses, 3)), -1)
+            r = tf.nn.softmax(logits, 1)
+            r *= tf.expand_dims(output_activations, 2)
+            r /= tf.reduce_sum(r, axis=1, keep_dims=True)
+            r = tf.where(masks, r, tf.zeros(tf.shape(r)))
+            r *= input_activations
+            r_sum = tf.reduce_sum(r, 2, keep_dims=True)
+            new_output_poses = tf.reduce_max(tf.expand_dims(r, 3)*tf.expand_dims(input_poses, 1), 2)
+            new_output_poses = fully_connected(new_output_poses,
+                                               size,
+                                               is_training=is_training,
+                                               reuse=True,
+                                               scope="output_poses")
+            new_output_poses = tf.nn.l2_normalize(new_output_poses, -1)
+            new_output_activations = tf.reduce_sum(r*tf.squeeze(tf.matmul(votes, tf.expand_dims(new_output_poses, 3)), -1), axis=2)
+            new_output_activations = tf.sigmoid(new_output_activations - beta)
+            update = new_output_poses - output_poses
+            open_mask = tf.greater(
+                tf.reduce_max(
+                    tf.norm(update, axis=-1)/(tf.norm(output_poses, axis=-1)+1e-12),
+                    axis=-1),
+                1e-1)
+            output_poses = tf.where(open_mask, new_output_poses, output_poses)
+            output_activations = tf.where(open_mask, new_output_activations, output_activations)
+            counter += 1
+            return output_poses, output_activations, open_mask, counter
+
+        output_poses, output_activations, _, _ = tf.while_loop(
+            cond,
+            body,
+            [output_poses, output_activations, tf.ones([tf.shape(output_poses)[0]], dtype=tf.bool), 0])
+    return output_poses, output_activations
+
+def dynamic_route4(values,
+                   masks,
+                   size=None,
+                   is_training=True):
+    """dynamic attend on lower layer inputs
+
+    values: [batch_size x length x num_modes x dim]
+    """
+
+    if size == None:
+        size = values.get_shape()[-1].value
+    batch_size = tf.shape(values)[0]
+    length = tf.shape(values)[1]
+    num_modes = tf.shape(values)[2]
+    seq_len = tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True)
+    masks = tf.tile(tf.expand_dims(masks, -1), [1, 1, num_modes])
+    # votes [batch_size X length X num_modes X size]
+    votes = fully_connected(tf.nn.relu(values),
+                            size,
+                            is_training=is_training,
+                            scope='votes')
+    # logits [batch_size X length X num_modes]
+    logits = tf.zeros([batch_size, length, num_modes])
+    probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
+    # cap_feat [batch_size X size]
+    cap_feat = tf.reduce_sum(tf.expand_dims(probs, -1)*votes, [1,2]) / seq_len
+
+    def cond(cap_feat, probs, open_mask):
+        return tf.reduce_any(open_mask)
+
+    def body(cap_feat, probs, open_mask):
+        logits = tf.matmul(tf.reshape(votes, [batch_size, length*num_modes, size]),
+                           tf.expand_dims(cap_feat, -1))
+        logits = tf.reshape(logits, [batch_size, length, num_modes])
+        probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
+        new_cap_feat = tf.reduce_sum(tf.expand_dims(probs, -1)*votes, [1,2]) / seq_len
+        update = new_cap_feat - cap_feat
+        open_mask = tf.greater(
+            tf.norm(update, axis=1)/(tf.norm(cap_feat, axis=1)+1e-12),
+            1e-1)
+        cap_feat = tf.where(open_mask, cap_feat+0.5*update, cap_feat)
+        return cap_feat, probs, open_mask
+    _, probs, _ = tf.while_loop(cond,
+                                body,
+                                [cap_feat, probs, tf.ones([tf.shape(cap_feat)[0]], dtype=tf.bool)])
+    values = tf.reduce_sum(values * tf.expand_dims(probs, -1), axis=2)
+    return values
+
+def dynamic_route5(values,
+                   masks,
+                   size=None,
+                   is_training=True):
+    """dynamic attend on lower layer inputs
+
+    values: [batch_size x length x num_modes x dim]
+    """
+
+    if size == None:
+        size = values.get_shape()[-1].value
+    batch_size = tf.shape(values)[0]
+    length = tf.shape(values)[1]
+    num_modes = values.get_shape()[2].value
+
+    seq_len = tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True)
+    maskss = tf.tile(tf.expand_dims(masks, -1), [1, 1, num_modes])
+    # votes [batch_size X length X num_modes X size]
+    votes = values
+    # logits [batch_size X length X num_modes]
+
+    vote_list = tf.unstack(votes, axis=-2)
+    fancy_mask_list = []
+    fancy_vote_list = []
+    for i in range(len(vote_list)):
+        rp = i//2
+        lp = i - rp
+        mask = tf.pad(masks, [[0,0], [lp,rp]])
+        vote = tf.pad(vote_list[i], [[0,0], [lp,rp], [0,0]])
+        for j in range(i+1):
+            fancy_mask_list.append(tf.slice(mask, [0,j], [-1,length]))
+            fancy_vote_list.append(tf.slice(vote, [0,j,0], [-1,length,-1]))
+    fancy_masks = tf.stack(fancy_mask_list, axis=-1)
+    fancy_votes = tf.stack(fancy_vote_list, axis=-2)
+
+    # cap_feat [batch_size X size]
+    logits = tf.zeros([batch_size, length, int((1+num_modes)*num_modes/2)])
+    cap_feat = tf.reduce_sum(
+        tf.expand_dims(tf.nn.softmax(logits), axis=-1) * fancy_votes,
+        axis=2)
+
+    def cond(cap_feat, open_mask):
+        return tf.reduce_any(open_mask)
+
+    def body(cap_feat, open_mask):
+        logits = tf.matmul(fancy_votes,
+                           tf.expand_dims(cap_feat, -1))
+        logits = tf.reshape(logits, [batch_size, length, int((1+num_modes)*num_modes/2)])
+        new_cap_feat = tf.reduce_sum(
+            tf.expand_dims(tf.nn.softmax(logits), axis=-1) * fancy_votes,
+            axis=2)
+        update = new_cap_feat - cap_feat
+        update = tf.reshape(update, [batch_size*length, size])
+        cap_feat = tf.reshape(cap_feat, [batch_size*length, size])
+        open_mask = tf.greater(
+            tf.norm(update, axis=-1)/(tf.norm(cap_feat, axis=-1)+1e-12),
+            1e-1)
+        cap_feat = tf.where(open_mask, cap_feat+0.5*update, cap_feat)
+        cap_feat = tf.reshape(cap_feat, [batch_size, length, size])
+        return cap_feat, open_mask
+    cap_feat, _ = tf.while_loop(cond,
+                                body,
+                                [cap_feat, tf.ones([tf.shape(cap_feat)[0]], dtype=tf.bool)])
+    return cap_feat
 
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
     """Wrapper for attention mechanism"""
@@ -1086,51 +1570,4 @@ def make_logit_fn(vocab_embedding,
                 logits = tf.reshape(logits, [-1, vocab_size])
             return logits
     return logit_fn
-
-# Capsule
-
-def dynamic_route(query,
-                   keys,
-                   values,
-                   masks,
-                   coverage=None,
-                   size=None,
-                   is_training=True):
-    """dynamic route lower layer inputs
-
-    query: [batch_size x dim]
-    keys: [batch_size x length x dim]
-    values: [batch_size x length x dim]
-    """
-
-    if query.get_shape().ndims == 2:
-        querys = tf.expand_dims(query, 1)
-    else:
-        querys = query
-    if size == None:
-        size = querys.get_shape()[-1].value
-    num = querys.get_shape()[1].value
-    querys = tf.expand_dims(querys, 2)
-    keys = tf.expand_dims(keys, 1)
-    votes = fully_connected(tf.nn.relu(querys + keys),
-                            size,
-                            is_training=is_training,
-                            scope='votes')
-    attn_feat = tf.zeros(tf.concat([tf.shape(querys)[:2], tf.constant([size])], 0))
-    masks = tf.tile(tf.expand_dims(masks, 1), [1, num, 1])
-    for _ in range(3):
-        attn_feat = tf.expand_dims(attn_feat, 3)
-        logits = tf.squeeze(tf.matmul(votes, attn_feat), axis=-1)
-        probs = tf.where(masks, tf.nn.softmax(logits), tf.zeros(tf.shape(logits)))
-        attn_dist = probs / tf.reduce_sum(probs, -1, keep_dims=True)
-        attn_feat = tf.reduce_sum(tf.expand_dims(attn_dist, -1) * votes, [2])
-    if query.get_shape().ndims == 2:
-        attn_feat = tf.squeeze(attn_feat, 1)
-        attn_dist = tf.squeeze(attn_dist, 1)
-    if coverage != None:
-        coverage += attn_dist
-        return attn_feat, attn_dist, coverage
-    else:
-        return attn_feat, attn_dist, None
-
 
