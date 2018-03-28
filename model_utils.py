@@ -21,7 +21,6 @@ from tensorflow.python.util import nest
 
 def fully_connected(inputs,
                     num_outputs,
-                    decay=0.999,
                     activation_fn=None,
                     dropout=None,
                     is_training=True,
@@ -61,6 +60,7 @@ def fully_connected(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
+        weights = tf.nn.l2_normalize(weights, 1)
         weights = tf.nn.l2_normalize(weights, 0)
         weights_norm = tf.exp(weights_norm)
         biases = tf.contrib.framework.model_variable(
@@ -99,6 +99,7 @@ def convolution2d(inputs,
                   output_sizes,
                   kernel_sizes,
                   pool_size=None,
+                  group_size=None,
                   activation_fn=None,
                   dropout=None,
                   is_training=True,
@@ -142,9 +143,8 @@ def convolution2d(inputs,
                     initializer=tf.contrib.layers.xavier_initializer(),
                     collections=tf.GraphKeys.WEIGHTS,
                     trainable=True)
-                weights = tf.nn.l2_normalize(
-                    tf.reshape(weights, [-1, output_size]), 0)
-                weights = tf.reshape(weights, weights_shape)
+                weights = tf.nn.l2_normalize(weights, 3)
+                weights = tf.nn.l2_normalize(weights, [0,1,2])
                 weights_norm = tf.exp(weights_norm)
                 biases = tf.contrib.framework.model_variable(
                     name='biases',
@@ -156,6 +156,11 @@ def convolution2d(inputs,
                 outputs = tf.nn.conv2d(
                     inputs, weights, [1,1,1,1], padding='SAME') * weights_norm
                 outputs = outputs + biases
+                if group_size:
+                    num_group = output_size // group_size
+                    outputs = tf.stack(tf.split(outputs, num_group, axis=-1), axis=-1)
+                    outputs = tf.nn.l2_normalize(outputs, [1,2,3])
+                    outputs = tf.concat(tf.unstack(outputs, axis=-1), axis=-1)
                 output_list.append(outputs)
 
         if len(output_list) == 1:
@@ -169,6 +174,7 @@ def convolution2d(inputs,
 
         if activation_fn:
             outputs = activation_fn(outputs)
+
         return outputs
 
 
@@ -226,14 +232,14 @@ def MLP(inputs,
                                       is_training=is_training,
                                       scope="layer"+str(i))
         outputs = fully_connected(outputs,
-                                   output_size,
-                                   is_training=is_training,
-                                   scope="layer"+str(num_layers-1))
+                                  output_size,
+                                  is_training=is_training,
+                                  scope="layer"+str(num_layers-1))
         return outputs
 
 def ResDNN(inputs,
            num_layers,
-           hidden_size,
+           size,
            activation_fn=tf.nn.relu,
            dropout=None,
            is_training=True,
@@ -255,17 +261,72 @@ def ResDNN(inputs,
                 lambda: tf.nn.dropout(inputs, dropout),
                 lambda: inputs)
 
-        size = inputs.get_shape()[-1].value
-        outputs = inputs
+        outputs = MLP(inputs,
+                      2,
+                      size,
+                      size,
+                      is_training=is_training,
+                      scope="proj")
         # residual layers
         for i in range(num_layers):
-            outputs += MLP(outputs,
+            residual = MLP(outputs,
                            2,
-                           hidden_size,
+                           size,
                            size,
                            is_training=is_training,
-                           scope="mlp")
-            outputs += update
+                           scope="mlp"+str(i))
+            outputs += residual
+        return outputs
+
+def ResDNN2(inputs,
+            num_layers,
+            size,
+            activation_fn=tf.nn.relu,
+            dropout=None,
+            is_training=True,
+            reuse=None,
+            scope=None):
+    """ a deep neural net with fully connected layers
+
+    """
+
+    with tf.variable_scope(scope,
+                           "ResDNN",
+                           [inputs],
+                           reuse=reuse) as sc:
+        if dropout == None:
+            inputs = inputs
+        else:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+
+        feats = fully_connected(inputs,
+                                size,
+                                is_training=is_training,
+                                scope="proj")
+        outputs = 0.0
+        reuse = None
+        # residual layers
+        for i in range(num_layers):
+            outputs += fully_connected(tf.nn.relu(feats),
+                                       size,
+                                       activation_fn=tf.nn.relu,
+                                       is_training=is_training,
+                                       reuse=reuse,
+                                       scope="fw")
+            feats -= fully_connected(outputs,
+                                     size,
+                                     activation_fn=tf.nn.relu,
+                                     is_training=is_training,
+                                     reuse=reuse,
+                                     scope="bw")
+            reuse=True
+        outputs = fully_connected(outputs,
+                                  size,
+                                  is_training=is_training,
+                                  scope="outputs")
         return outputs
 
 def SIRDNN(inputs,
@@ -825,53 +886,88 @@ def dynamic_route3(num_outputs,
             trainable=True)
 
         if size == None:
-             size = input_poses.get_shape()[-1].value
+            size = input_poses.get_shape()[-1].value
+        num_votes = 16
+        batch_size = tf.shape(input_poses)[0]
+        length = tf.shape(input_poses)[1]
         seq_len = tf.expand_dims(tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True), -1)
-        masks = tf.tile(tf.expand_dims(masks, 1), [1, num_outputs, 1])
-        votes = MLP(input_poses,
-                    2,
-                    512,
-                    num_outputs*size,
-                    is_training=is_training,
-                    scope='votes')
+        masks = tf.tile(tf.expand_dims(tf.expand_dims(masks, 1), 2), [1, num_outputs, num_votes, 1])
+        #votes = MLP(input_poses,
+        #            2,
+        #            512,
+        #            num_outputs*size,
+        #            is_training=is_training,
+        #            scope='votes')
+        votes = fully_connected(input_poses,
+                                num_votes*size,
+                                is_training=is_training,
+                                scope='votes')
         votes = tf.reshape(votes,
-                           tf.concat([tf.shape(input_poses)[:2], [num_outputs, size]], 0))
+                           tf.concat([tf.shape(input_poses)[:2], [num_votes, size]], 0))
         votes = tf.transpose(votes, [0, 2, 1, 3])
+        votes = tf.nn.relu(votes)
+        votes = tf.tile(tf.expand_dims(votes, 1), [1,num_outputs,1,1,1])
         input_activations = tf.expand_dims(input_activations, 1)
-        r = tf.ones(tf.stack([tf.shape(input_poses)[0], num_outputs, tf.shape(input_poses)[1]], 0))
-        r /= tf.reduce_sum(r, axis=1, keep_dims=True)
+        r = tf.ones(tf.stack([batch_size, num_outputs, num_votes, length], 0))
+        r /= tf.reduce_sum(r, axis=[2], keep_dims=True)
         r = tf.where(masks, r, tf.zeros(tf.shape(r)))
-        r *= input_activations
-        r_sum = tf.reduce_sum(r, 2, keep_dims=True)
-        output_poses = tf.reduce_max(tf.expand_dims(r, 3)*tf.expand_dims(input_poses, 1), 2)
-        output_poses = fully_connected(output_poses,
-                                       size,
-                                       is_training=is_training,
-                                       scope="output_poses")
-        output_poses = tf.nn.l2_normalize(output_poses, -1)
-        output_activations = tf.reduce_sum(r*tf.squeeze(tf.matmul(votes, tf.expand_dims(output_poses, 3)), -1), axis=2)
-        output_activations = tf.sigmoid(output_activations - beta)
+        #r *= input_activations
+        #r_sum = tf.reduce_sum(r, 2, keep_dims=True)
+        #max_pool = tf.reduce_max(tf.expand_dims(r, 4)*votes, axis=[2,3])
+        #output_poses = fully_connected(output_poses,
+        #                               size,
+        #                               is_training=is_training,
+        #                               scope="output_poses")
+        #expectations = tf.reduce_sum(tf.expand_dims(r, 3)*votes, axis=2) / r_sum
+        max_pool = tf.zeros([batch_size, num_outputs, size])
+        feat = fully_connected(max_pool,
+                               num_outputs*(size+1),
+                               is_training=is_training,
+                               scope="feat")
+        feat = tf.reshape(feat, [batch_size, num_outputs, num_outputs, size+1])
+        idx0 = tf.tile(tf.expand_dims(tf.range(batch_size), 1), [1, num_outputs])
+        idx1 = tf.tile(tf.expand_dims(tf.range(num_outputs), 0), [batch_size, 1])
+        idx = tf.stack([idx0, idx1, idx1], axis=2)
+        feat = tf.gather_nd(feat, idx)
+        output_poses, output_activations = tf.split(
+            feat,
+            [size, 1],
+            axis=-1)
+        output_activations = tf.squeeze(tf.sigmoid(output_activations), -1)
 
         def cond(output_poses, output_activations, open_mask, counter):
             return tf.logical_and(tf.reduce_any(open_mask), tf.less(counter, 5))
 
         def body(output_poses, output_activations, open_mask, counter):
-            logits = tf.squeeze(tf.matmul(votes, tf.expand_dims(output_poses, 3)), -1)
-            r = tf.nn.softmax(logits, 1)
-            r *= tf.expand_dims(output_activations, 2)
-            r /= tf.reduce_sum(r, axis=1, keep_dims=True)
+            logits = tf.squeeze(tf.matmul(
+                tf.reshape(votes, [batch_size,num_outputs,num_votes*length,size]),
+                tf.expand_dims(output_poses, 3)), -1)
+            r = tf.reshape(logits, [batch_size, num_outputs, num_votes, length])
+            r = tf.nn.softmax(r, 2)
+            #r *= tf.expand_dims(output_activations, 2)
+            #r /= tf.reduce_sum(r, axis=[2], keep_dims=True)
             r = tf.where(masks, r, tf.zeros(tf.shape(r)))
-            r *= input_activations
-            r_sum = tf.reduce_sum(r, 2, keep_dims=True)
-            new_output_poses = tf.reduce_max(tf.expand_dims(r, 3)*tf.expand_dims(input_poses, 1), 2)
-            new_output_poses = fully_connected(new_output_poses,
-                                               size,
-                                               is_training=is_training,
-                                               reuse=True,
-                                               scope="output_poses")
-            new_output_poses = tf.nn.l2_normalize(new_output_poses, -1)
-            new_output_activations = tf.reduce_sum(r*tf.squeeze(tf.matmul(votes, tf.expand_dims(new_output_poses, 3)), -1), axis=2)
-            new_output_activations = tf.sigmoid(new_output_activations - beta)
+           # r *= input_activations
+           # r_sum = tf.reduce_sum(r, 2, keep_dims=True)
+            #new_output_poses = fully_connected(new_output_poses,
+            #                                   size,
+            #                                   is_training=is_training,
+            #                                   reuse=True,
+            #                                   scope="output_poses")
+            #expectations = tf.reduce_sum(tf.expand_dims(r, 3)*votes, axis=2) / r_sum
+            max_pool = tf.reduce_max(tf.expand_dims(r, 4)*votes, axis=[2,3])
+            feat = fully_connected(max_pool,
+                                   num_outputs*(size+1),
+                                   is_training=is_training,
+                                   reuse=True,
+                                   scope="feat")
+            feat = tf.reshape(feat, [batch_size, num_outputs, num_outputs, size+1])
+            feat = tf.gather_nd(feat, idx)
+            new_output_poses, new_output_activations = tf.split(
+                feat,
+                [size, 1],
+                axis=-1)
+            new_output_activations = tf.squeeze(tf.sigmoid(new_output_activations), -1)
             update = new_output_poses - output_poses
             open_mask = tf.greater(
                 tf.reduce_max(
