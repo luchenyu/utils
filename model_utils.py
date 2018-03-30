@@ -60,9 +60,18 @@ def fully_connected(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
-        weights = tf.nn.l2_normalize(weights, 1)
-        weights = tf.nn.l2_normalize(weights, 0)
-        weights_norm = tf.exp(weights_norm)
+        if is_training:
+            if not sc.reuse:
+                norm_ops = [
+                    weights.assign(
+                        tf.nn.l2_normalize(
+                            tf.nn.l2_normalize(weights, 1), 0) * tf.exp(weights_norm)),
+                    weights_norm.assign(tf.zeros([num_outputs,]))]
+            else: norm_ops = []
+            with tf.control_dependencies(norm_ops):
+                weights = tf.nn.l2_normalize(weights, 1)
+                weights = tf.nn.l2_normalize(weights, 0)
+                weights_norm = tf.exp(weights_norm)
         biases = tf.contrib.framework.model_variable(
             'biases',
             shape=[num_outputs,],
@@ -81,7 +90,10 @@ def fully_connected(inputs,
                 lambda: tf.nn.dropout(inputs, dropout),
                 lambda: inputs)
 
-        outputs = tf.matmul(inputs, weights) * weights_norm
+        outputs = tf.matmul(inputs, weights)
+
+        if is_training:
+            outputs *= weights_norm
 
         outputs = outputs + biases
 
@@ -143,9 +155,18 @@ def convolution2d(inputs,
                     initializer=tf.contrib.layers.xavier_initializer(),
                     collections=tf.GraphKeys.WEIGHTS,
                     trainable=True)
-                weights = tf.nn.l2_normalize(weights, 3)
-                weights = tf.nn.l2_normalize(weights, [0,1,2])
-                weights_norm = tf.exp(weights_norm)
+                if is_training:
+                    if not sc.reuse:
+                        norm_ops = [
+                            weights.assign(
+                                tf.nn.l2_normalize(
+                                    tf.nn.l2_normalize(weights, 3), [0,1,2]) * tf.exp(weights_norm)),
+                            weights_norm.assign(tf.zeros([output_size,]))]
+                    else: norm_ops = []
+                    with tf.control_dependencies(norm_ops):
+                        weights = tf.nn.l2_normalize(weights, 3)
+                        weights = tf.nn.l2_normalize(weights, [0,1,2])
+                        weights_norm = tf.exp(weights_norm)
                 biases = tf.contrib.framework.model_variable(
                     name='biases',
                     shape=[output_size,],
@@ -154,8 +175,74 @@ def convolution2d(inputs,
                     collections=tf.GraphKeys.BIASES,
                     trainable=True)
                 outputs = tf.nn.conv2d(
-                    inputs, weights, [1,1,1,1], padding='SAME') * weights_norm
+                    inputs, weights, [1,1,1,1], padding='SAME')
+                if is_training:
+                    outputs *= weights_norm
                 outputs = outputs + biases
+                if group_size:
+                    num_group = output_size // group_size
+                    outputs = tf.stack(tf.split(outputs, num_group, axis=-1), axis=-1)
+                    outputs = tf.nn.l2_normalize(outputs, [1,2,3])
+                    outputs = tf.concat(tf.unstack(outputs, axis=-1), axis=-1)
+                output_list.append(outputs)
+
+        if len(output_list) == 1:
+            outputs = output_list[0]
+        else:
+            outputs = tf.concat(output_list, axis=-1)
+
+        if pool_size:
+            pool_shape = [1] + list(pool_size) + [1]
+            outputs = tf.nn.max_pool(outputs, pool_shape, pool_shape, padding='SAME')
+
+        if activation_fn:
+            outputs = activation_fn(outputs)
+
+        return outputs
+
+
+def mpconv2d(inputs,
+             output_sizes,
+             kernel_sizes,
+             pool_size=None,
+             group_size=None,
+             activation_fn=None,
+             dropout=None,
+             is_training=True,
+             reuse=None,
+             scope=None):
+    """Adds a 2D convolution followed by a maxpool layer.
+
+    """
+
+    with tf.variable_scope(scope,
+                           'Conv',
+                           [inputs],
+                           reuse=reuse) as sc:
+        dtype = inputs.dtype.base_dtype
+        num_filters_in = inputs.get_shape()[-1].value
+        if type(output_sizes) == int:
+            output_sizes = [output_sizes]
+            kernel_sizes = [kernel_sizes]
+        assert(len(output_sizes) == len(kernel_sizes))
+        if dropout != None:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+        output_list = []
+        for i in range(len(output_sizes)):
+            with tf.variable_scope("conv"+str(i)):
+                kernel_size = kernel_sizes[i]
+                output_size = output_sizes[i]
+                outputs = tf.nn.max_pool(inputs,
+                                         [1]+kernel_size+[1],
+                                         [1,1,1,1],
+                                         'SAME')
+                outputs = fully_connected(outputs,
+                                          output_size,
+                                          is_training=is_training,
+                                          scope="fc")
                 if group_size:
                     num_group = output_size // group_size
                     outputs = tf.stack(tf.split(outputs, num_group, axis=-1), axis=-1)
