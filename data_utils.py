@@ -88,6 +88,21 @@ class Vocab(object):
         text = "".join([self.idx2key(i) for i in token_ids])
         return text
 
+class Dict(object):
+    def __init__(self, filename):
+        self.filename = filename
+        self._dict = {}
+        if os.path.exists(filename):
+            for line in open(filename, 'r'):
+                key, values = line.strip().split('\t')
+                self._dict[key] = values.split(' ')
+    def lookup(self, key):
+        value = self._dict.get(key)
+        if value:
+            return value
+        else:
+            return []
+
 class FastWord2vec(object):
     """
     Load word2vec model using gensim, cache the embedding matrix using numpy
