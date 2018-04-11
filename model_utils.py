@@ -60,18 +60,22 @@ def fully_connected(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=tf.GraphKeys.WEIGHTS,
             trainable=True)
-        if is_training:
-            if not sc.reuse:
-                norm_ops = [
-                    weights.assign(
+        norm_op1 = tf.cond(
+            tf.logical_or(tf.cast(sc.reuse, tf.bool),tf.logical_not(tf.cast(is_training, tf.bool))),
+            lambda: tf.no_op,
+            lambda: weights.assign(
                         tf.nn.l2_normalize(
-                            tf.nn.l2_normalize(weights, 1), 0) * tf.exp(weights_norm)),
-                    weights_norm.assign(tf.zeros([num_outputs,]))]
-            else: norm_ops = []
-            with tf.control_dependencies(norm_ops):
-                weights = tf.nn.l2_normalize(weights, 1)
-                weights = tf.nn.l2_normalize(weights, 0)
-                weights_norm = tf.exp(weights_norm)
+                            tf.nn.l2_normalize(weights, 1), 0) * tf.exp(weights_norm)))
+        norm_op2 = tf.cond(
+            tf.logical_or(tf.cast(sc.reuse, tf.bool),tf.logical_not(tf.cast(is_training, tf.bool))),
+            lambda: tf.no_op,
+            lambda: weights_norm.assign(tf.zeros([num_outputs,])))
+        with tf.control_dependencies([norm_op1, norm_op2]):
+            weights = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.l2_normalize(tf.nn.l2_normalize(weights, 1), 0),
+                lambda: tf.identity(weights))
+        weights_norm = tf.exp(weights_norm)
         biases = tf.contrib.framework.model_variable(
             'biases',
             shape=[num_outputs,],
@@ -92,8 +96,10 @@ def fully_connected(inputs,
 
         outputs = tf.matmul(inputs, weights)
 
-        if is_training:
-            outputs *= weights_norm
+        outputs = tf.cond(
+            tf.cast(is_training, tf.bool),
+            lambda: outputs*weights_norm,
+            lambda: outputs)
 
         outputs = outputs + biases
 
@@ -155,18 +161,22 @@ def convolution2d(inputs,
                     initializer=tf.contrib.layers.xavier_initializer(),
                     collections=tf.GraphKeys.WEIGHTS,
                     trainable=True)
-                if is_training:
-                    if not sc.reuse:
-                        norm_ops = [
-                            weights.assign(
-                                tf.nn.l2_normalize(
-                                    tf.nn.l2_normalize(weights, 3), [0,1,2]) * tf.exp(weights_norm)),
-                            weights_norm.assign(tf.zeros([output_size,]))]
-                    else: norm_ops = []
-                    with tf.control_dependencies(norm_ops):
-                        weights = tf.nn.l2_normalize(weights, 3)
-                        weights = tf.nn.l2_normalize(weights, [0,1,2])
-                        weights_norm = tf.exp(weights_norm)
+                norm_op1 = tf.cond(
+                    tf.logical_or(tf.cast(sc.reuse, tf.bool),tf.logical_not(tf.cast(is_training, tf.bool))),
+                    lambda: tf.no_op,
+                    lambda: weights.assign(
+                        tf.nn.l2_normalize(
+                            tf.nn.l2_normalize(weights, 3), [0,1,2]) * tf.exp(weights_norm)))
+                norm_op2 = tf.cond(
+                    tf.logical_or(tf.cast(sc.reuse, tf.bool),tf.logical_not(tf.cast(is_training, tf.bool))),
+                    lambda: tf.no_op,
+                    lambda: weights_norm.assign(tf.zeros([output_size,])))
+                with tf.control_dependencies([norm_op1, norm_op2]):
+                    weights = tf.cond(
+                        tf.cast(is_training, tf.bool),
+                        lambda: tf.nn.l2_normalize(tf.nn.l2_normalize(weights, 3), [0,1,2]),
+                        lambda: tf.identity(weights))
+                weights_norm = tf.exp(weights_norm)
                 biases = tf.contrib.framework.model_variable(
                     name='biases',
                     shape=[output_size,],
@@ -176,8 +186,10 @@ def convolution2d(inputs,
                     trainable=True)
                 outputs = tf.nn.conv2d(
                     inputs, weights, [1,1,1,1], padding='SAME')
-                if is_training:
-                    outputs *= weights_norm
+                outputs = tf.cond(
+                    tf.cast(is_training, tf.bool),
+                    lambda: outputs*weights_norm,
+                    lambda: outputs)
                 outputs = outputs + biases
                 if group_size:
                     num_group = output_size // group_size
