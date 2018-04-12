@@ -62,8 +62,8 @@ def fully_connected(inputs,
             trainable=True)
         norm_op1 = weights.assign(
             tf.nn.l2_normalize(
-                tf.nn.l2_normalize(weights, 1), 0) * tf.exp(weights_norm)))
-        norm_op2 = weights_norm.assign(tf.zeros([num_outputs,])))
+                tf.nn.l2_normalize(weights, 1), 0) * tf.exp(weights_norm))
+        norm_op2 = weights_norm.assign(tf.zeros([num_outputs,]))
         with tf.control_dependencies([norm_op1, norm_op2]):
             norm_op = tf.no_op()
         norm_op = tf.cond(
