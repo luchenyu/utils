@@ -193,7 +193,7 @@ def convolution2d(inputs,
                 outputs = outputs + biases
                 if group_size:
                     num_group = output_size // group_size
-                    outputs = tf.stack(tf.split(outputs, num_group, axis=-1), axis=-1)
+                    outputs = tf.stack(tf.split(outputs, num_group, axis=3), axis=-1)
                     outputs = tf.nn.l2_normalize(outputs, [1,2,3])
                     outputs = tf.concat(tf.unstack(outputs, axis=-1), axis=-1)
                 output_list.append(outputs)
