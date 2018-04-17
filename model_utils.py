@@ -116,6 +116,7 @@ def fully_connected(inputs,
 def convolution2d(inputs,
                   output_sizes,
                   kernel_sizes,
+                  dilation_rates=None,
                   pool_size=None,
                   group_size=None,
                   activation_fn=None,
@@ -147,6 +148,9 @@ def convolution2d(inputs,
             with tf.variable_scope("conv"+str(i)):
                 kernel_size = kernel_sizes[i]
                 output_size = output_sizes[i]
+                dilation_rate = None
+                if dilation_rates != None:
+                    dilation_rate = dilation_rates[i]
                 weights_shape = list(kernel_size) + [num_filters_in, output_size]
                 weights = tf.contrib.framework.model_variable(
                     name='weights',
@@ -184,8 +188,8 @@ def convolution2d(inputs,
                     initializer=tf.zeros_initializer(),
                     collections=tf.GraphKeys.BIASES,
                     trainable=True)
-                outputs = tf.nn.conv2d(
-                    inputs, weights, [1,1,1,1], padding='SAME')
+                outputs = tf.nn.convolution(
+                    inputs, weights, padding='SAME', dilation_rate=dilation_rate)
                 outputs = tf.cond(
                     tf.cast(is_training, tf.bool),
                     lambda: outputs*weights_norm,
@@ -578,8 +582,6 @@ def ResCNN(inputs,
 
 def DGCNN(inputs,
           num_layers,
-          kernel_sizes,
-          activation_fn=None,
           dropout=None,
           is_training=True,
           reuse=None,
@@ -589,7 +591,7 @@ def DGCNN(inputs,
     """
 
     with tf.variable_scope(scope,
-                           "ResCNN",
+                           "DGCNN",
                            [inputs],
                            reuse=reuse) as sc:
         size = inputs.get_shape()[-1].value
@@ -602,28 +604,38 @@ def DGCNN(inputs,
                 lambda: inputs)
 
         # residual layers
-        ru = None
+        dilate_size = 0
         for i in range(num_layers):
-            gates = [tf.expand_dims(tf.zeros(tf.shape(inputs)[:-1]), axis=-1),]
-            updates = [tf.zeros(tf.shape(inputs)),]
-            if activation_fn != None:
-                inputs = activation_fn(inputs)
-            for k, kernel_size in enumerate(kernel_sizes):
-                temp = convolution2d(inputs,
-                                     size+1,
-                                     kernel_size,
-                                     activation_fn=None,
-                                     is_training=is_training,
-                                     reuse=ru,
-                                     scope="k"+str(k))
-                gate, update = tf.split(temp, [1, size], axis=-1)
-                gates.append(gate)
-                updates.append(update)
-            gates = tf.nn.softmax(tf.stack(gates, axis=-1))
-            updates = tf.stack(updates, axis=-1)
-            inputs = tf.reduce_sum(gates*updates, axis=-1)
-            ru = True
-        return inputs
+            inputs_proj = fully_connected(inputs,
+                                          2*size,
+                                          activation_fn=tf.nn.relu,
+                                          is_training=is_training,
+                                          scope="projs_"+str(i))
+            pool_size = 1+2*dilate_size
+            if pool_size > 1:
+                inputs_proj = tf.nn.max_pool(inputs_proj,
+                                             [1,1,pool_size,1],
+                                             [1,1,1,1],
+                                             'SAME')
+            dilate_size = 2**i
+            gates = convolution2d(inputs_proj,
+                                  [size],
+                                  [[1,3]],
+                                  dilation_rates=[[1,dilate_size]],
+                                  group_size=4,
+                                  activation_fn=tf.sigmoid,
+                                  is_training=is_training,
+                                  scope="gates_"+str(i))
+            convs = convolution2d(inputs_proj,
+                                  [size],
+                                  [[1,3]],
+                                  dilation_rates=[[1,dilate_size]],
+                                  group_size=4,
+                                  is_training=is_training,
+                                  scope="convs_"+str(i))
+            outputs = (1.0-gates)*inputs + gates*convs
+            inputs = outputs
+        return outputs
 
 ### RNN ###
 class GRUCell(tf.contrib.rnn.RNNCell):
