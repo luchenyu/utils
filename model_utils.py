@@ -607,7 +607,7 @@ def DGCNN(inputs,
         dilate_size = 0
         for i in range(num_layers):
             inputs_proj = fully_connected(inputs,
-                                          2*size,
+                                          size,
                                           activation_fn=tf.nn.relu,
                                           is_training=is_training,
                                           scope="projs_"+str(i))
@@ -622,7 +622,6 @@ def DGCNN(inputs,
                                   [size],
                                   [[1,3]],
                                   dilation_rates=[[1,dilate_size]],
-                                  group_size=4,
                                   activation_fn=tf.sigmoid,
                                   is_training=is_training,
                                   scope="gates_"+str(i))
@@ -630,7 +629,6 @@ def DGCNN(inputs,
                                   [size],
                                   [[1,3]],
                                   dilation_rates=[[1,dilate_size]],
-                                  group_size=4,
                                   is_training=is_training,
                                   scope="convs_"+str(i))
             outputs = (1.0-gates)*inputs + gates*convs
