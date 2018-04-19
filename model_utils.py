@@ -622,7 +622,6 @@ def DGCNN(inputs,
                                   [size],
                                   [[1,3]],
                                   dilation_rates=[[1,dilate_size]],
-                                  group_size=4,
                                   activation_fn=tf.sigmoid,
                                   is_training=is_training,
                                   scope="gates_"+str(i))
@@ -630,7 +629,6 @@ def DGCNN(inputs,
                                   [size],
                                   [[1,3]],
                                   dilation_rates=[[1,dilate_size]],
-                                  group_size=4,
                                   is_training=is_training,
                                   scope="convs_"+str(i))
             outputs = (1.0-gates)*inputs + gates*convs
@@ -736,11 +734,11 @@ def attention(query,
         return attn_feat, attn_dist, None
 
 def attention2(query,
-              keys,
-              values,
-              masks,
-              coverage=None,
-              is_training=True):
+               keys,
+               values,
+               masks,
+               coverage=None,
+               is_training=True):
     """ implements the attention mechanism
 
     query: [batch_size x dim]
@@ -748,29 +746,23 @@ def attention2(query,
     values: [batch_size x length x dim]
     """
 
-    query = tf.expand_dims(query, 1)
+    single_query = False
+    if len(query.get_shape()) == 2:
+        single_query = True
+        query = tf.expand_dims(query, 1)
     if coverage != None:
-        c = tf.expand_dims(tf.expand_dims(coverage, 1), 3)
-        size = query.get_shape()[-1].value
-        feat = query + keys + tf.squeeze(
-            convolution2d(c,
-                          size,
-                          [1, 5],
-                          is_training=is_training,
-                          scope="coverage"),
-            axis=[1])
-    else:
-        feat = query + keys
-    logits = fully_connected(
-        tf.tanh(feat), 1, is_training=is_training, scope="attention")
-    logits = tf.squeeze(logits, [2])
-    gates = tf.where(masks, tf.sigmoid(logits), tf.ones(tf.shape(logits)))
-    attn_feat = tf.reduce_max(tf.expand_dims(gates, 2) * values, [1])
-    if coverage != None:
-        coverage += gates
-        return attn_feat, gates, coverage
-    else:
-        return attn_feat, gates, None
+        coverage = None
+    size = values.get_shape()[-1].value
+    feat = tf.expand_dims(query, 2) + tf.expand_dims(keys, 1)
+    gates = fully_connected(tf.tanh(feat),
+                            size,
+                            activation_fn=tf.sigmoid,
+                            is_training=is_training,
+                            scope="gates")
+    attn_feats = tf.reduce_max(tf.expand_dims(values, 1) * gates, 2)
+    if single_query:
+        attn_feats = tf.squeeze(attn_feats, 1)
+    return attn_feats, gates, None
 
 def dynamic_attention(query,
                       keys,
