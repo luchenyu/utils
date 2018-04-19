@@ -607,7 +607,7 @@ def DGCNN(inputs,
         dilate_size = 0
         for i in range(num_layers):
             inputs_proj = fully_connected(inputs,
-                                          size,
+                                          2*size,
                                           activation_fn=tf.nn.relu,
                                           is_training=is_training,
                                           scope="projs_"+str(i))
