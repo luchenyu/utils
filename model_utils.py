@@ -610,7 +610,7 @@ def DGCNN(inputs,
                                           2*size,
                                           activation_fn=tf.nn.relu,
                                           is_training=is_training,
-                                          scope="projs_"+str(i))
+                                          scope="inputs_proj_"+str(i))
             pool_size = 1+2*dilate_size
             if pool_size > 1:
                 inputs_proj = tf.nn.max_pool(inputs_proj,
@@ -618,19 +618,20 @@ def DGCNN(inputs,
                                              [1,1,1,1],
                                              'SAME')
             dilate_size = 2**i
-            gates = convolution2d(inputs_proj,
-                                  [size],
-                                  [[1,3]],
-                                  dilation_rates=[[1,dilate_size]],
-                                  activation_fn=tf.sigmoid,
-                                  is_training=is_training,
-                                  scope="gates_"+str(i))
-            convs = convolution2d(inputs_proj,
-                                  [size],
-                                  [[1,3]],
-                                  dilation_rates=[[1,dilate_size]],
-                                  is_training=is_training,
-                                  scope="convs_"+str(i))
+            contexts = convolution2d(inputs_proj,
+                                     [size],
+                                     [[1,3]],
+                                     dilation_rates=[[1,dilate_size]],
+                                     is_training=is_training,
+                                     scope="contexts_"+str(i))
+            outputs_proj = MLP(tf.concat([inputs, contexts], axis=-1),
+                               2,
+                               2*size,
+                               2*size,
+                               is_training=is_training,
+                               scope="outputs_proj_"+str(i))
+            gates, convs = tf.split(outputs_proj, 2, axis=-1)
+            gates = tf.sigmoid(gates)
             outputs = (1.0-gates)*inputs + gates*convs
             inputs = outputs
         return outputs
@@ -736,7 +737,7 @@ def attention(query,
 def attention2(query,
                keys,
                values,
-               masks,
+               masks=None,
                coverage=None,
                is_training=True):
     """ implements the attention mechanism
@@ -762,7 +763,7 @@ def attention2(query,
     attn_feats = tf.reduce_max(tf.expand_dims(values, 1) * gates, 2)
     if single_query:
         attn_feats = tf.squeeze(attn_feats, 1)
-    return attn_feats, gates, None
+    return attn_feats
 
 def dynamic_attention(query,
                       keys,
