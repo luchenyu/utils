@@ -33,6 +33,7 @@ def fully_connected(inputs,
     if not isinstance(num_outputs, int):
         raise ValueError('num_outputs should be integer, got %s.', num_outputs)
 
+    trainable = (is_training != False)
     with tf.variable_scope(scope,
                            'fully_connected',
                            [inputs],
@@ -52,15 +53,15 @@ def fully_connected(inputs,
             shape=weights_shape,
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
-            trainable=True)
+            trainable=trainable)
         weights_norm = tf.contrib.framework.model_variable(
             'weights_norm',
             shape=[num_outputs,],
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
-            collections=tf.GraphKeys.WEIGHTS,
-            trainable=True)
-        if is_training != False:
+            collections=tf.GraphKeys.WEIGHTS if trainable else None,
+            trainable=trainable)
+        if trainable:
             norm_op = weights.assign(
                 tf.nn.l2_normalize(
                     weights, 0) * tf.exp(weights_norm))
@@ -78,8 +79,8 @@ def fully_connected(inputs,
             shape=[num_outputs,],
             dtype=dtype,
             initializer=tf.zeros_initializer(),
-            collections=tf.GraphKeys.BIASES,
-            trainable=True)
+            collections=tf.GraphKeys.BIASES if trainable else None,
+            trainable=trainable)
 
         if len(static_shape) > 2:
             # Reshape inputs
@@ -128,6 +129,8 @@ def convolution2d(inputs,
             output_sizes = [output_sizes]
             kernel_sizes = [kernel_sizes]
         assert(len(output_sizes) == len(kernel_sizes))
+
+        trainable = (is_training != False)
         if dropout != None:
             inputs = tf.cond(
                 tf.cast(is_training, tf.bool),
@@ -147,14 +150,14 @@ def convolution2d(inputs,
                     shape=weights_shape,
                     dtype=dtype,
                     initializer=tf.contrib.layers.xavier_initializer(),
-                    trainable=True)
+                    trainable=trainable)
                 weights_norm = tf.contrib.framework.model_variable(
                     'weights_norm',
                     shape=[output_size,],
                     dtype=dtype,
                     initializer=tf.contrib.layers.xavier_initializer(),
-                    collections=tf.GraphKeys.WEIGHTS,
-                    trainable=True)
+                    collections=tf.GraphKeys.WEIGHTS if trainable else None,
+                    trainable=trainable)
                 if is_training != False:
                     norm_op = weights.assign(
                         tf.nn.l2_normalize(
@@ -173,8 +176,8 @@ def convolution2d(inputs,
                     shape=[output_size,],
                     dtype=dtype,
                     initializer=tf.zeros_initializer(),
-                    collections=tf.GraphKeys.BIASES,
-                    trainable=True)
+                    collections=tf.GraphKeys.BIASES if trainable else None,
+                    trainable=trainable)
                 outputs = tf.nn.convolution(
                     inputs, weights, padding='SAME', dilation_rate=dilation_rate) + biases
                 if group_size:
@@ -243,7 +246,7 @@ def mpconv2d(inputs,
                                           scope="fc")
                 if group_size:
                     num_group = output_size // group_size
-                    outputs = tf.stack(tf.split(outputs, num_group, axis=-1), axis=-1)
+                    outputs = tf.stack(tf.split(outputs, num_group, axis=3), axis=-1)
                     outputs = tf.nn.l2_normalize(outputs, [1,2,3])
                     outputs = tf.concat(tf.unstack(outputs, axis=-1), axis=-1)
                 output_list.append(outputs)
@@ -443,7 +446,6 @@ def SIRDNN(inputs,
         for i in range(num_layers):
             outputs -= fully_connected(activation_fn(outputs),
                                        size,
-                                       decay=decay,
                                        activation_fn=activation_fn,
                                        is_training=is_training,
                                        reuse=ru,
@@ -515,7 +517,6 @@ def ResCNN(inputs,
             kernel_size,
             pool_size,
             pool_layers=1,
-            decay=0.99999,
             activation_fn=tf.nn.relu,
             dropout=None,
             is_training=True,
@@ -612,7 +613,7 @@ def DGCNN(inputs,
                                2*size,
                                is_training=is_training,
                                scope="outputs_proj_"+str(i))
-            gates, convs = tf.split(outputs_proj, 2, axis=-1)
+            gates, convs = tf.split(outputs_proj, 2, axis=3)
             gates = tf.sigmoid(gates)
             outputs = (1.0-gates)*inputs + gates*convs
             inputs = outputs
@@ -1310,7 +1311,6 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
 def create_cell(size,
                 num_layers,
                 cell_type="GRU",
-                decay=0.99999,
                 activation_fn=tf.tanh,
                 linear=None,
                 is_training=True):
@@ -1320,7 +1320,7 @@ def create_cell(size,
         """fully connected layers inside the rnn cell"""
 
         return fully_connected(
-            inputs, num_outputs, decay=decay, is_training=is_training)
+            inputs, num_outputs, is_training=is_training)
 
     if not linear:
         linear=_linear
