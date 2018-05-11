@@ -83,10 +83,9 @@ class Vocab(object):
     def token_ids_to_sentence(self, token_ids):
         """decode a sequence of token ids to a sentence
         """
-        token_ids = filter(lambda i: i != self.key2idx("_PAD"), token_ids)
         token_ids = map(lambda i: i if self.idx2key(i) else self.key2idx("_UNK"), token_ids)
-        text = "".join([self.idx2key(i) for i in token_ids])
-        return text
+        text = "".join([self.idx2key(i) if i != self.key2idx("_PAD") else ' ' for i in token_ids])
+        return text.strip(' ')
 
 class Dict(object):
     def __init__(self, filename):
