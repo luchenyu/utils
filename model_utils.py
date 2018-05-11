@@ -34,6 +34,13 @@ def fully_connected(inputs,
         raise ValueError('num_outputs should be integer, got %s.', num_outputs)
 
     trainable = (is_training != False)
+    collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+    weights_collections = collections
+    biases_collections = collections
+    if trainable:
+        weights_collections.append(tf.GraphKeys.WEIGHTS)
+        biases_collections.append(tf.GraphKeys.BIASES)
+
     with tf.variable_scope(scope,
                            'fully_connected',
                            [inputs],
@@ -48,18 +55,18 @@ def fully_connected(inputs,
         out_shape[-1] = num_outputs
 
         weights_shape = [num_input_units, num_outputs]
-        weights = tf.contrib.framework.model_variable(
+        weights = tf.get_variable(
             'weights',
             shape=weights_shape,
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
             trainable=trainable)
-        weights_norm = tf.contrib.framework.model_variable(
+        weights_norm = tf.get_variable(
             'weights_norm',
             shape=[num_outputs,],
             dtype=dtype,
             initializer=tf.contrib.layers.xavier_initializer(),
-            collections=tf.GraphKeys.WEIGHTS if trainable else None,
+            collections=weights_collections,
             trainable=trainable)
         if trainable:
             norm_op = weights.assign(
@@ -74,12 +81,12 @@ def fully_connected(inputs,
                     tf.cast(is_training, tf.bool),
                     lambda: tf.nn.l2_normalize(weights, 0)*tf.exp(weights_norm),
                     lambda: tf.identity(weights))
-        biases = tf.contrib.framework.model_variable(
+        biases = tf.get_variable(
             'biases',
             shape=[num_outputs,],
             dtype=dtype,
             initializer=tf.zeros_initializer(),
-            collections=tf.GraphKeys.BIASES if trainable else None,
+            collections=biases_collections,
             trainable=trainable)
 
         if len(static_shape) > 2:
@@ -119,6 +126,14 @@ def convolution2d(inputs,
 
     """
 
+    trainable = (is_training != False)
+    collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+    weights_collections = collections
+    biases_collections = collections
+    if trainable:
+        weights_collections.append(tf.GraphKeys.WEIGHTS)
+        biases_collections.append(tf.GraphKeys.BIASES)
+
     with tf.variable_scope(scope,
                            'Conv',
                            [inputs],
@@ -129,8 +144,6 @@ def convolution2d(inputs,
             output_sizes = [output_sizes]
             kernel_sizes = [kernel_sizes]
         assert(len(output_sizes) == len(kernel_sizes))
-
-        trainable = (is_training != False)
         if dropout != None:
             inputs = tf.cond(
                 tf.cast(is_training, tf.bool),
@@ -145,18 +158,18 @@ def convolution2d(inputs,
                 if dilation_rates != None:
                     dilation_rate = dilation_rates[i]
                 weights_shape = list(kernel_size) + [num_filters_in, output_size]
-                weights = tf.contrib.framework.model_variable(
+                weights = tf.get_variable(
                     name='weights',
                     shape=weights_shape,
                     dtype=dtype,
                     initializer=tf.contrib.layers.xavier_initializer(),
                     trainable=trainable)
-                weights_norm = tf.contrib.framework.model_variable(
+                weights_norm = tf.get_variable(
                     'weights_norm',
                     shape=[output_size,],
                     dtype=dtype,
                     initializer=tf.contrib.layers.xavier_initializer(),
-                    collections=tf.GraphKeys.WEIGHTS if trainable else None,
+                    collections=weights_collections,
                     trainable=trainable)
                 if is_training != False:
                     norm_op = weights.assign(
@@ -171,12 +184,12 @@ def convolution2d(inputs,
                             tf.cast(is_training, tf.bool),
                             lambda: tf.nn.l2_normalize(weights, [0,1,2])*tf.exp(weights_norm),
                             lambda: tf.identity(weights))
-                biases = tf.contrib.framework.model_variable(
+                biases = tf.get_variable(
                     name='biases',
                     shape=[output_size,],
                     dtype=dtype,
                     initializer=tf.zeros_initializer(),
-                    collections=tf.GraphKeys.BIASES if trainable else None,
+                    collections=biases_collections,
                     trainable=trainable)
                 outputs = tf.nn.convolution(
                     inputs, weights, padding='SAME', dilation_rate=dilation_rate) + biases
@@ -283,6 +296,42 @@ def params_decay(decay):
             p.assign(decay*p + (1-decay)*tf.truncated_normal(
                 p.get_shape(), stddev=0.01)))
 
+### Optimize ###
+
+def optimize_loss(loss,
+                  global_step,
+                  learning_rate,
+                  optimizer):
+    """ Optimize the model using the loss.
+
+    """
+
+    if optimizer == 'Adam':
+        optimizer = tf.train.AdamOptimizer(
+            learning_rate=learning_rate,
+            beta1=0.9,
+            beta2=0.999)
+
+    grad_var_list = optimizer.compute_gradients(loss)
+    
+    candidates = tf.get_collection(
+        tf.GraphKeys.WEIGHTS) + tf.get_collection(tf.GraphKeys.BIASES)
+
+    update_ops = []
+    for grad_var in grad_var_list:
+        grad, var = grad_var
+        if (grad == None) or (not var in candidates):
+            continue
+        update_ops.append(
+            var.assign(
+                (1.0 - 0.1*learning_rate)*var + \
+                (0.1*learning_rate)*tf.truncated_normal(
+                    tf.shape(var), stddev=0.01)))
+    with tf.control_dependencies(update_ops):
+        train_op = optimizer.apply_gradients(
+            grad_var_list,
+            global_step=global_step)
+    return train_op
 
 ### Nets ###
 
