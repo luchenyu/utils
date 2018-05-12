@@ -4,7 +4,7 @@ import numpy as np
 WORD2VEC = None
 
 class Vocab(object):
-    def __init__(self, filename, init=None, cutoff=None):
+    def __init__(self, filename, init=None, cutoff=None, embedding_files=None):
         self.filename = filename
         self.reserved_vocab_list = []
         self.vocab_list = []
@@ -23,6 +23,25 @@ class Vocab(object):
                 self.vocab_dict[item] = [len(self.vocab_dict), -1]
         self.changed = False
         self.cutoff = cutoff if cutoff else sys.maxsize
+        if embedding_files != None:
+            word2vecs = []
+            w2v_sizes = []
+            for path in embedding_files.split(','):
+                word2vecs.append(FastWord2vec(path))
+                w2v_sizes.append(word2vecs[-1].syn0.shape[1])
+            self.embedding_init = np.random.normal(0.0, 0.01, (self.size(), sum(w2v_sizes)))
+            for idx, word in enumerate(self.vocab_list[:self.size()]):
+                ptr = 0
+                for i, word2vec in enumerate(word2vecs):
+                    try:
+                        hit = word2vec[word]
+                        self.embedding_init[idx, ptr:ptr+w2v_sizes[i]] = hit
+                    except:
+                        pass
+                    finally:
+                        ptr += w2v_sizes[i]
+        else:
+            self.embedding_init = None
 
     def idx2key(self, idx):
         """given index return key"""
