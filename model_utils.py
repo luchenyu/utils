@@ -294,7 +294,7 @@ def params_decay(decay):
         tf.add_to_collection(
             tf.GraphKeys.UPDATE_OPS,
             p.assign(decay*p + (1-decay)*tf.truncated_normal(
-                p.get_shape(), stddev=0.01)))
+                tf.shape(p), stddev=0.01)))
 
 ### Optimize ###
 
@@ -334,6 +334,39 @@ def optimize_loss(loss,
     return train_op
 
 ### Nets ###
+
+def GLU(inputs,
+        output_size,
+        dropout=None,
+        is_training=True,
+        reuse=None,
+        scope=None):
+    """ Gated Linear Units.
+
+    """
+
+    with tf.variable_scope(scope,
+                           "GLU",
+                           [inputs],
+                           reuse=reuse) as sc:
+        if dropout != None:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+        projs = fully_connected(
+            inputs,
+            output_size,
+            is_training=is_training,
+            scope="projs")
+        gates = fully_connected(
+            inputs,
+            output_size,
+            activation_fn=tf.sigmoid,
+            is_training=is_training,
+            scope="gates")
+        outputs = projs*gates
+        return outputs
 
 def MLP(inputs,
         num_layers,
