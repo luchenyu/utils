@@ -702,6 +702,31 @@ def DGCNN(inputs,
         return outputs
 
 ### RNN ###
+
+def cudnn_lstm(num_layers,
+               num_units,
+               direction,
+               input_shape,
+               trainable=True):
+    """Create a cudnn lstm."""
+
+    lstm = tf.contrib.cudnn_rnn.CudnnLSTM(
+        num_layers=num_layers,
+        num_units=num_units,
+        direction=direction)
+    lstm.build(input_shape)
+    if trainable and tf.get_variable_scope().reuse != True:
+        for var in lstm.trainable_variables:
+            tf.add_to_collection(
+                tf.GraphKeys.WEIGHTS,
+                var)
+    elif not trainable:
+        train_vars = tf.get_collection_ref(tf.GraphKeys.TRAINABLE_VARIABLES)
+        for var in lstm.trainable_variables:
+            train_vars.remove(var)
+    return lstm
+
+
 class GRUCell(tf.contrib.rnn.RNNCell):
   """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
 
