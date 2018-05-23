@@ -313,7 +313,7 @@ def optimize_loss(loss,
             beta2=0.999)
 
     grad_var_list = optimizer.compute_gradients(loss)
-    
+
     candidates = tf.get_collection(
         tf.GraphKeys.WEIGHTS) + tf.get_collection(tf.GraphKeys.BIASES)
 
@@ -725,6 +725,84 @@ def cudnn_lstm(num_layers,
         for var in lstm.trainable_variables:
             train_vars.remove(var)
     return lstm
+
+def cudnn_lstm_legacy(inputs,
+                      num_layers,
+                      hidden_size,
+                      direction,
+                      is_training):
+    """Create a cudnn lstm."""
+
+    def cudnn_lstm_parameter_size(input_size, hidden_size):
+        biases = 8 * hidden_size
+        weights = 4 * (hidden_size * input_size) + 4 * (hidden_size * hidden_size)
+        return biases + weights
+    def direction_to_num_directions(direction):
+        if direction == "unidirectional":
+            return 1
+        elif direction == "bidirectional":
+            return 2
+        else:
+            raise ValueError("Unknown direction: %r." % (direction,))
+    def estimate_cudnn_parameter_size(num_layers,
+                                      input_size,
+                                      hidden_size,
+                                      input_mode,
+                                      direction):
+        num_directions = direction_to_num_directions(direction)
+        params = 0
+        isize = input_size
+        for layer in range(num_layers):
+            for direction in range(num_directions):
+                params += cudnn_lstm_parameter_size(
+                    isize, hidden_size
+                )
+            isize = hidden_size * num_directions
+            return params
+
+    input_size = inputs.get_shape()[-1].value
+    if input_size is None:
+        raise ValueError("Number of input dimensions to CuDNN RNNs must be "
+                         "known, but was None.")
+
+    # CUDNN expects the inputs to be time major
+    inputs = tf.transpose(inputs, [1, 0, 2])
+
+    cudnn_cell = tf.contrib.cudnn_rnn.CudnnLSTM(
+        num_layers, hidden_size, input_size,
+        input_mode="linear_input", direction=direction)
+
+    est_size = estimate_cudnn_parameter_size(
+        num_layers=num_layers,
+        hidden_size=hidden_size,
+        input_size=input_size,
+        input_mode="linear_input",
+        direction=direction)
+
+    cudnn_params = tf.get_variable(
+        "RNNParams",
+        shape=[est_size],
+        initializer=tf.contrib.layers.variance_scaling_initializer(),
+        collections=[tf.GraphKeys.GLOBAL_VARIABLES,
+                     tf.GraphKeys.WEIGHTS])
+
+    init_state = tf.tile(
+        tf.zeros([2 * num_layers, 1, hidden_size], dtype=tf.float32),
+        [1, tf.shape(inputs)[1], 1])
+
+    hiddens, output_h, output_c = cudnn_cell(
+        inputs,
+        input_h=init_state,
+        input_c=init_state,
+        params=cudnn_params,
+        is_training=is_training)
+
+    # Convert to batch major
+    hiddens = tf.transpose(hiddens, [1, 0, 2])
+    output_h = tf.transpose(output_h, [1, 0, 2])
+    output_c = tf.transpose(output_c, [1, 0, 2])
+
+    return hiddens, tf.concat([output_h, output_c], axis=1)
 
 
 class GRUCell(tf.contrib.rnn.RNNCell):
