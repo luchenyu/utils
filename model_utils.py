@@ -300,19 +300,14 @@ def params_decay(decay):
 
 def optimize_loss(loss,
                   global_step,
-                  learning_rate,
-                  optimizer):
+                  optimizer,
+                  var_list=None):
     """ Optimize the model using the loss.
 
     """
 
-    if optimizer == 'Adam':
-        optimizer = tf.train.AdamOptimizer(
-            learning_rate=learning_rate,
-            beta1=0.9,
-            beta2=0.999)
-
-    grad_var_list = optimizer.compute_gradients(loss)
+    grad_var_list = optimizer.compute_gradients(loss, var_list)
+    learning_rate = optimizer._lr
 
     candidates = tf.get_collection(
         tf.GraphKeys.WEIGHTS) + tf.get_collection(tf.GraphKeys.BIASES)
