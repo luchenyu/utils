@@ -928,6 +928,84 @@ def attention2(query,
         attn_feats = tf.squeeze(attn_feats, 1)
     return attn_feats
 
+def read(query,
+         keys,
+         values,
+         num_group=1,
+         masks=None,
+         is_training=True):
+    """ implements the attention mechanism
+
+    query: [[batch_size] x query_size x dim]
+    keys: [[batch_size] x length x dim]
+    values: [[batch_size] x length x value_dim]
+    """
+
+    batch_mode = (len(query.get_shape()) == 3)
+    if not batch_mode:
+        query = tf.expand_dims(query, 0)
+        keys = tf.expand_dims(keys, 0)
+        values = tf.expand_dims(values, 0)
+    batch_size = tf.shape(query)[0]
+    query_size = tf.shape(query)[1]
+    query_dim = query.get_shape()[-1].value
+    key_size = tf.shape(keys)[1]
+    key_dim = keys.get_shape()[-1].value
+    assert(query_dim == key_dim)
+    value_size = tf.shape(values)[1]
+    value_dim = values.get_shape()[-1].value
+
+    query = tf.reshape(
+        query,
+        [batch_size, query_size, num_group, query_dim / num_group])
+    query = tf.transpose(query, [0, 2, 1, 3])
+    query = tf.reshape(
+        query,
+        [batch_size*num_group, query_size, query_dim / num_group])
+    keys = tf.reshape(
+        keys,
+        [batch_size, key_size, num_group, key_dim / num_group])
+    keys = tf.transpose(keys, [0, 2, 1, 3])
+    keys = tf.reshape(
+        keys,
+        [batch_size*num_group, key_size, key_dim / num_group])
+    values = tf.reshape(
+        values,
+        [batch_size, value_size, num_group, value_dim / num_group])
+    values = tf.transpose(values, [0, 2, 1, 3])
+    values = tf.reshape(
+        values,
+        [batch_size*num_group, value_size, value_dim / num_group])
+    logits = tf.matmul(
+        query,
+        keys,
+        transpose_b=True)
+    probs = tf.nn.softmax(logits)
+    if masks != None:
+        probs = tf.reshape(
+            probs,
+            [batch_size, num_group*query_size, key_size])
+        masks = tf.tile(tf.expand_dims(masks, 1), [1, num_group*query_size, 1])
+        probs = tf.where(masks, probs, tf.zeros(tf.shape(probs)))
+        probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True)+1e-12)
+        probs = tf.reshape(
+            probs,
+            [batch_size*num_group, query_size, key_size])
+    outputs = tf.matmul(
+        probs,
+        values)
+    outputs = tf.reshape(
+        outputs,
+        [batch_size, num_group, query_size, value_dim / num_group])
+    outputs = tf.transpose(outputs, [0, 2, 1, 3])
+    outputs = tf.reshape(
+        outputs,
+        [batch_size, query_size, value_dim])
+    if not batch_mode:
+        outputs = tf.squeeze(outputs, 0)
+
+    return outputs
+
 def dynamic_attention(query,
                       keys,
                       values,
