@@ -9,7 +9,7 @@ class Vocab(object):
         self.reserved_vocab_list = []
         self.vocab_list = []
         self.vocab_dict = {}
-        if os.path.exists(filename) and init == None:
+        if os.path.exists(filename):
             for line in open(filename, 'r'):
                 [key, count] = line.strip("\n").split("\t")
                 if int(count) < 0:
