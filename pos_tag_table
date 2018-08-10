@@ -1,0 +1,57 @@
+ltp|863	thulac	jieba	meaning
+a	a	a	形容词
+		ag	形语素
+		ad	副形词
+		an	名形词
+b		b	区别词
+c	c	c	连词
+d	d	d	副词
+		df
+		dg	副语素
+e	e	e	叹词
+g	g	g	语素
+h	h	h	前接成分
+i	i	i	成语
+j	j	j	简称
+k	k	k	后接成分
+	id	l	习用语
+m	m	m	数词
+	mq	mq	数量词
+n	n	n	名词
+		ng	名语素
+nd	f	f	方位词
+nh	np	nr	人名
+ni	ni	nt	机构名
+nl	s	s	处所词
+ns	ns	ns	地名
+nt	t	t	时间词
+		tg	时语素
+nz	nz	nz	其他专名
+		nrfg
+		nrt
+o	o	o	拟声词
+p	p	p	介词
+q	q	q	量词
+r	r	r	代词
+		rg	代词语素
+		rr
+		rz
+u	u	u	助词
+		ud
+		ug
+		uj
+		ul
+		uv
+		uz
+v	v	v	动词
+		vg	动语素
+		vd	副动词
+		vn	动名词
+		vi
+		vq
+wp	w	w	标点符号
+ws		eng	外文
+x	x	x	非语素
+	y	y	语气词
+z		z	状态词
+		zg

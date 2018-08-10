@@ -1,7 +1,15 @@
+
 import gensim, os, re, sys
 import numpy as np
+import jieba.posseg as pseg
+import thulac
+from pyltp import Segmentor
+from pyltp import Postagger
+import synonyms
 
 WORD2VEC = None
+__location__ = os.path.realpath(
+        os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
 class Vocab(object):
     def __init__(self, filename, init=None, cutoff=None, embedding_files=None):
@@ -113,13 +121,13 @@ class Dict(object):
         if os.path.exists(filename):
             for line in open(filename, 'r'):
                 key, values = line.strip().split('\t')
-                self._dict[key] = values.split(' ')
+                self._dict[key] = values
     def lookup(self, key):
         value = self._dict.get(key)
         if value:
             return value
         else:
-            return []
+            return None
 
 class FastWord2vec(object):
     """
@@ -194,3 +202,78 @@ class FastWord2vec(object):
         if WORD2VEC is None:
             WORD2VEC = FastWord2vec(path)
         return WORD2VEC
+
+
+class Cutter(object):
+    """
+    one cutter to include them all!
+    """
+    def __init__(self):
+
+        self.jieba_pos_map = Dict(os.path.join(__location__, 'jieba_pos_map'))
+
+        self.thulac = thulac.thulac()
+        self.thulac_pos_map = Dict(os.path.join(__location__, 'thulac_pos_map'))
+
+        ltp_path = os.path.join(__location__, "ltp_data_v3.4.0")
+        self.ltp_seg = Segmentor()
+        self.ltp_seg.load(os.path.join(ltp_path, "cws.model"))
+        self.ltp_pos = Postagger()
+        self.ltp_pos.load(os.path.join(ltp_path, "pos.model"))
+        self.ltp_pos_map = Dict(os.path.join(__location__, 'ltp_pos_map'))
+
+    def cut_words(self, text, cutter='jieba'):
+        """
+        cut the words
+
+        cutter: jieba|thulac
+        """
+        if cutter == 'jieba':
+            s = list(pseg.cut(text))
+            s = map(lambda i: (i.word.encode('utf-8'), self.jieba_pos_map.lookup(i.flag.encode('utf-8'))), s)
+        elif cutter == 'thulac':
+            s = self.thulac.cut(text)
+            s = map(lambda i: (i[0], self.thulac_pos_map.lookup(i[1])), s)
+        elif cutter == 'ltp':
+            s1 = self.ltp_seg.segment(text)
+            s2 = self.ltp_pos.postag(s1)
+            s2 = map(lambda i: self.ltp_pos_map.lookup(i), s2)
+            s = zip(s1, s2)
+        return s
+
+class Synonyms(object):
+    """
+    Get synonyms using various resources!
+    """
+    def __init__(self):
+        with open(os.path.join(__location__, 'cilin.txt'), 'r') as f:
+            cilin = map(lambda i: i.strip().split()[1:], f.readlines())
+        self.cilin_map = dict(zip(range(len(cilin)), cilin))
+        self.cilin_index = {}
+        for id, words in self.cilin_map.items():
+            for word in words:
+                if word in self.cilin_index:
+                    self.cilin_index[word].add(id)
+                else:
+                    self.cilin_index[word] = set([id])
+
+    def get(self, word, source='synonyms'):
+        if source == 'synonyms':
+            candidates, scores = synonyms.nearby(word)
+            if len(candidates) > 0:
+                results = zip(candidates, scores)
+                results = filter(lambda i: i[1] > 0.5, results)
+                results = map(lambda i: i[0].encode('utf-8'), results)
+                results.remove(word)
+            else:
+                results = []
+        elif source == 'cilin':
+            if word in self.cilin_index:
+                results = map(lambda i: self.cilin_map[i], self.cilin_index[word])
+                results = reduce(lambda a, b: a+b, results)
+                results = list(set(results))
+                results.remove(word)
+            else:
+                results = []
+        return results
+
