@@ -298,7 +298,7 @@ def posseg_to_token_ids(pos_segs, vocab, posseg_vocab):
             continue
         seqs.extend(word_ids)
         segs.extend([0.0]*(len(word_ids)-1)+[1.0])
-        segs = segs[:-1]
         pos_labels.append(tag)
+    segs = segs[:-1]
     pos_labels = posseg_vocab.sentence_to_token_ids(pos_labels)
     return seqs, segs, pos_labels
