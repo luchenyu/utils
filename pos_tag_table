@@ -4,6 +4,7 @@ a	a	a	形容词
 		ad	副形词
 		an	名形词
 b		b	区别词
+		bg
 c	c	c	连词
 d	d	d	副词
 		df
@@ -12,10 +13,12 @@ e	e	e	叹词
 g	g	g	语素
 h	h	h	前接成分
 i	i	i	成语
+		in
 j	j	j	简称
 k	k	k	后接成分
 	id	l	习用语
 m	m	m	数词
+		mg
 	mq	mq	数量词
 n	n	n	名词
 		ng	名语素
@@ -53,5 +56,6 @@ wp	w	w	标点符号
 ws		eng	外文
 x	x	x	非语素
 	y	y	语气词
+		yg
 z		z	状态词
 		zg
