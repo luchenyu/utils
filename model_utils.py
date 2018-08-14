@@ -1598,6 +1598,49 @@ def create_cell(size,
         cell = tf.contrib.rnn.MultiRNNCell([single_cell] * num_layers, state_is_tuple=True)
     return cell
 
+### Glow ###
+def glow(inputs,
+         num_layers,
+         num_iters,
+         step_fn,
+         is_training=True,
+         reuse=None,
+         scope=None):
+    """ glow architecture """
+    with tf.variable_scope(scope,
+                           "Glow",
+                           [inputs],
+                           reuse=reuse) as sc:
+        x = inputs
+        zlist = []
+        for i in range(num_iters):
+            with tf.variable_scope("iter"+str(i)):
+                xdim = x.get_shape()[-1].value
+                for j in range(num_layers):
+                    with tf.variable_scope("layer"+str(j)):
+                        x = fully_connected(x,
+                                            xdim,
+                                            is_training=is_training,
+                                            reuse=reuse,
+                                            scope="permut")
+                        xa,xb = tf.split(x, [xdim//2, xdim-xdim//2], axis=-1)
+                        feat = step_fn(xb, xdim//2*2, is_training=is_training, reuse=reuse)
+                        logs,t = tf.split(feat, 2, axis=-1)
+                        s = tf.exp(logs)
+                        ya = s*xa+t
+                        yb = xb
+                        y = tf.concat([ya, yb], axis=-1)
+                        x = y
+                if i < num_iters-1:
+                    z,h = tf.split(y, [xdim//2, xdim-xdim//2], axis=-1)
+                    zlist.append(z)
+                    x = h
+                else:
+                    zlist.append(y)
+        outputs = tf.concat(zlist, axis=-1)
+    return outputs
+
+
 
 ### Recurrent Decoders ###
 
@@ -2011,3 +2054,97 @@ def make_logit_fn(vocab_embedding,
             return logits
     return logit_fn
 
+
+### Miscellaneous ###
+
+def slice_fragments(inputs, starts, lengths):
+    """ Extract the documents_features corresponding to choosen sentences.
+    Since sentences are different lengths, this will be jagged. Therefore,
+    we extract the maximum length sentence and then pad appropriately.
+
+    Arguments:
+        inputs: [batch, time, features]
+        starts: [batch, beam_size] starting locations
+        lengths: [batch, beam_size] how much to trim.
+
+    Returns:
+        fragments: [batch, beam_size, max_length, features]
+    """
+    batch = tf.shape(inputs)[0]
+    time = tf.shape(inputs)[1]
+    beam_size = tf.shape(starts)[1]
+    features = inputs.get_shape()[-1].value
+
+    # Collapse the batch and time dimensions
+    inputs = tf.reshape(
+        inputs, [batch * time, features])
+
+    # Compute the starting location of each sentence and adjust
+    # the start locations to account for collapsed time dimension.
+    starts += tf.expand_dims(time * tf.range(batch), 1)
+    starts = tf.reshape(starts, [-1])
+
+    # Gather idxs are consecutive rows beginning at start
+    # and ending at start + length, for each start in starts.
+    # If starts is [0; 6] and length is [0, 1, 2], then the
+    # result is [0, 1, 2; 6, 7, 8], which is flattened to
+    # [0; 1; 2; 6; 7; 8].
+    # Ensure length is at least 1.
+    max_length = tf.maximum(tf.reduce_max(lengths), 1)
+    gather_idxs = tf.reshape(tf.expand_dims(starts, 1) +
+                             tf.expand_dims(tf.range(max_length), 0), [-1])
+
+    # Don't gather out of bounds
+    gather_idxs = tf.minimum(gather_idxs, tf.shape(inputs)[0] - 1)
+
+    # Pull out the relevant rows and partially reshape back.
+    fragments = tf.gather(inputs, gather_idxs)
+    fragments = tf.reshape(fragments, [batch * beam_size, max_length, features])
+
+    # Mask out invalid entries
+    length_mask = tf.sequence_mask(tf.reshape(lengths, [-1]), max_length)
+    length_mask = tf.expand_dims(tf.cast(length_mask, tf.float32), 2)
+
+    fragments *= length_mask
+
+    return tf.reshape(fragments, [batch, beam_size, max_length, features])
+
+def slice_words(seqs, segs):
+    """
+    slice seqs into pieces of words.
+    
+    seqs: seqs to slice
+    segs: segmentation labels indicate where to cut
+    """
+
+    max_length = tf.shape(seqs)[1]
+    seq_masks = tf.greater(seqs, 0)
+    seq_lengths = tf.reduce_sum(tf.to_int32(seq_masks), 1, keepdims=True)
+
+    segs *= tf.cast(seq_masks, tf.float32)[:,1:]
+    num_words = tf.reduce_sum(tf.to_int32(segs), axis=1)+1
+    max_num_word = tf.reduce_max(num_words)
+
+    def get_idx(inputs):
+        seg, seq_length, num_word = inputs
+        seg = tf.pad(seg, [[1,0]], constant_values=1.0)
+        idx = tf.range(max_length, dtype=tf.int32)
+        idx = tf.boolean_mask(idx, tf.cast(seg, tf.bool))
+        start = tf.pad(idx, [[0,max_num_word-num_word]])
+        idx = tf.concat([idx, seq_length], axis=0)
+        length = tf.pad(idx[1:] - idx[:-1], [[0,max_num_word-num_word]])
+        return start, length
+
+    starts, lengths = tf.map_fn(
+        get_idx,
+        [segs, seq_lengths, num_words],
+        (tf.int32, tf.int32),
+        parallel_iterations=128,
+        back_prop=False)
+
+    segmented_seqs = slice_fragments(
+        tf.to_float(tf.expand_dims(seqs, axis=-1)),
+        starts,
+        lengths)
+
+    return tf.to_int32(tf.squeeze(segmented_seqs, axis=-1))
