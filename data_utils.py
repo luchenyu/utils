@@ -1,6 +1,7 @@
 
 import gensim, os, re, sys
 import numpy as np
+import jieba
 import jieba.posseg as pseg
 import thulac
 from pyltp import Segmentor
@@ -210,6 +211,8 @@ class Cutter(object):
     """
     def __init__(self):
 
+        jieba.enable_parallel(64)
+
         self.jieba_pos_map = Dict(os.path.join(__location__, 'jieba_pos_map'))
 
         self.thulac = thulac.thulac()
@@ -277,3 +280,25 @@ class Synonyms(object):
                 results = []
         return results
 
+
+def posseg_to_token_ids(pos_segs, vocab, posseg_vocab):
+    """
+    Turn outputs of posseg into two seq of ids
+    """
+
+    seqs = []
+    segs = []
+    pos_labels = []
+    for token in pos_segs:
+        word, tag = token
+        if tag == None:
+            print(pos_segs)
+        word_ids = vocab.sentence_to_token_ids(word)
+        if len(word_ids) == 0:
+            continue
+        seqs.extend(word_ids)
+        segs.extend([0.0]*(len(word_ids)-1)+[1.0])
+        segs = segs[:-1]
+        pos_labels.append(tag)
+    pos_labels = posseg_vocab.sentence_to_token_ids(pos_labels)
+    return seqs, segs, pos_labels
