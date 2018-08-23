@@ -211,7 +211,7 @@ class Cutter(object):
     """
     def __init__(self):
 
-        jieba.enable_parallel(64)
+        jieba.enable_parallel(48)
 
         self.jieba_pos_map = Dict(os.path.join(__location__, 'jieba_pos_map'))
 
@@ -297,8 +297,9 @@ def posseg_to_token_ids(pos_segs, vocab, posseg_vocab):
         if len(word_ids) == 0:
             continue
         seqs.extend(word_ids)
-        segs.extend([0.0]*(len(word_ids)-1)+[1.0])
+        segs.extend([1.0]+[0.0]*(len(word_ids)-1))
         pos_labels.append(tag)
-    segs = segs[:-1]
+    if len(segs) > 0:
+        segs.append(1.0)
     pos_labels = posseg_vocab.sentence_to_token_ids(pos_labels)
     return seqs, segs, pos_labels
