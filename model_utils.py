@@ -897,36 +897,144 @@ def attention(query,
     else:
         return attn_feat, attn_dist, None
 
-def attention2(query,
-               keys,
-               values,
-               masks=None,
-               coverage=None,
-               is_training=True):
+def attention_simple(querys,
+                     keys,
+                     values,
+                     num_head=1,
+                     size=None,
+                     masks=None,
+                     is_training=True,
+                     reuse=None,
+                     scope=None,):
     """ implements the attention mechanism
 
-    query: [batch_size x dim]
+    querys: [batch_size x num_querys x dim]
     keys: [batch_size x length x dim]
     values: [batch_size x length x dim]
+    masks: [batch_size x num_querys x length]
     """
 
-    single_query = False
-    if len(query.get_shape()) == 2:
-        single_query = True
-        query = tf.expand_dims(query, 1)
-    if coverage != None:
-        coverage = None
-    size = values.get_shape()[-1].value
-    feat = tf.expand_dims(query, 2) + tf.expand_dims(keys, 1)
-    gates = fully_connected(tf.tanh(feat),
-                            size,
-                            activation_fn=tf.sigmoid,
-                            is_training=is_training,
-                            scope="gates")
-    attn_feats = tf.reduce_max(tf.expand_dims(values, 1) * gates, 2)
-    if single_query:
-        attn_feats = tf.squeeze(attn_feats, 1)
+    with tf.variable_scope(scope,
+                           "attention",
+                           [querys, keys, values],
+                           reuse=reuse) as sc:
+        single_query = False
+        if len(querys.get_shape()) == 2:
+            single_query = True
+            querys = tf.expand_dims(querys, 1)
+        if size == None:
+            size = values.get_shape()[-1].value
+
+        querys = fully_connected(
+            querys,
+            size,
+            is_training=is_training,
+            scope="query_projs")
+        querys = tf.stack(tf.split(querys, num_head, axis=-1), axis=1)
+        keys = fully_connected(
+            keys,
+            size,
+            is_training=is_training,
+            scope="key_projs")
+        keys = tf.stack(tf.split(keys, num_head, axis=-1), axis=1)
+        values = fully_connected(
+            values,
+            size,
+            is_training=is_training,
+            scope="value_projs")
+        values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
+
+        logits = tf.matmul(querys, keys, transpose_b=True)
+        logits /= tf.sqrt(tf.to_float(tf.shape(querys)[-1]))
+        probs = tf.nn.softmax(logits) * tf.expand_dims(tf.to_float(masks), axis=1)
+        probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
+        attn_feats = tf.matmul(probs, values)
+        attn_feats = tf.concat(tf.unstack(attn_feats, axis=1), axis=-1)
+        if single_query:
+            attn_feats = tf.squeeze(attn_feats, 1)
     return attn_feats
+
+def position_embedding(inputs):
+    batch_size,seq_len,position_size = map(lambda i: tf.squeeze(i), tf.split(tf.shape(inputs), 3, axis=0))
+    position_size = tf.to_float(position_size)
+    position_j = 1. / tf.pow(10000., \
+                             2 * tf.range(position_size / 2, dtype=tf.float32 \
+                            ) / position_size)
+    position_j = tf.expand_dims(position_j, 0)
+    position_i = tf.range(tf.cast(seq_len, tf.float32), dtype=tf.float32)
+    position_i = tf.expand_dims(position_i, 1)
+    position_ij = tf.matmul(position_i, position_j)
+    position_ij = tf.concat([tf.cos(position_ij), tf.sin(position_ij)], 1)
+    position_embedding = tf.expand_dims(position_ij, 0) \
+                         + tf.zeros([batch_size, seq_len, tf.to_int32(position_size)])
+    return position_embedding
+
+def transformer(inputs,
+                num_layers,
+                is_training=True,
+                reuse=None,
+                scope=None):
+    """Transformer decoder
+    """
+
+    with tf.variable_scope(scope,
+                           "Transformer",
+                           [inputs],
+                           reuse=reuse) as sc:
+        batch_size = tf.shape(inputs)[0]
+        length = tf.shape(inputs)[1]
+        size = inputs.get_shape()[-1].value
+        posit_embeds = position_embedding(inputs)
+        inputs += posit_embeds
+        masks = tf.sequence_mask(tf.tile(tf.expand_dims(tf.range(length)+1, 0), [batch_size, 1]))
+        for i in range(num_layers):
+            with tf.variable_scope("layer"+str(i)):
+                inputs += attention_simple(inputs, inputs, inputs,
+                    num_head=8, size=size, masks=masks, is_training=is_training)
+                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+                inputs += MLP(
+                    inputs,
+                    2,
+                    2*size,
+                    size,
+                    is_training=is_training)
+                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+        outputs = inputs
+    return outputs
+
+def transformer2(inputs,
+                 num_layers,
+                 is_training=True,
+                 reuse=None,
+                 scope=None):
+    """Transformer decoder
+    """
+
+    with tf.variable_scope(scope,
+                           "Transformer",
+                           [inputs],
+                           reuse=reuse) as sc:
+        batch_size = tf.shape(inputs)[0]
+        length = tf.shape(inputs)[1]
+        size = inputs.get_shape()[-1].value
+        posit_embeds = position_embedding(inputs)
+        inputs += posit_embeds
+        masks = tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool))
+        padded_inputs = tf.pad(inputs, [[0,0],[1,1],[0,0]])
+        contexts = padded_inputs[:,:-2] + padded_inputs[:,2:]
+        for i in range(num_layers):
+            with tf.variable_scope("layer"+str(i)):
+                contexts += attention_simple(contexts, inputs, inputs,
+                    num_head=8, size=size, masks=masks, is_training=is_training)
+                contexts = tf.contrib.layers.layer_norm(contexts, begin_norm_axis=-1)
+                contexts += MLP(
+                    contexts,
+                    2,
+                    2*size,
+                    size,
+                    is_training=is_training)
+                contexts = tf.contrib.layers.layer_norm(contexts, begin_norm_axis=-1)
+    return contexts
 
 def read(query,
          keys,
@@ -1702,9 +1810,11 @@ def stochastic_dec(length,
     outputs, state = cell(inputs, initial_state)
     logits = logit_fn(outputs)
 
-    symbol = tf.reshape(tf.multinomial(logits, num_candidates), [-1])
+    symbol = tf.to_int32(tf.reshape(tf.multinomial(logits, num_candidates), [-1]))
+    score = tf.reduce_sum(tf.one_hot(symbol, tf.shape(logits)[1]) * logits, axis=1)
     mask = tf.equal(symbol, 0)
     seq = [symbol]
+    scores = [score]
     tf.get_variable_scope().reuse_variables()
 
     beam_parents = tf.reshape(
@@ -1723,13 +1833,20 @@ def stochastic_dec(length,
         logits = logit_fn(outputs)
 
         symbol = tf.squeeze(tf.multinomial(logits, 1), [1])
+        score = tf.reduce_sum(tf.one_hot(symbol, tf.shape(logits)[1]) * logits, axis=1)
         symbol = tf.where(mask,
-                          tf.to_int64(tf.zeros([batch_size*num_candidates])),
-                          symbol)
+                          tf.zeros([batch_size*num_candidates], dtype=tf.int32),
+                          tf.to_int32(symbol))
+        score *= tf.to_float(tf.logical_not(mask))
         mask = tf.equal(symbol, 0)
         seq.append(symbol)
+        scores.append(score)
+    candidates = tf.reshape(tf.stack(seq, 1), [batch_size, num_candidates, length])
+    scores = tf.reshape(
+        tf.reduce_sum(tf.stack(scores, axis=-1), axis=-1),
+        [batch_size, num_candidates])
 
-    return tf.reshape(tf.stack(seq, 1), [batch_size, num_candidates, length])
+    return candidates, scores
 
 # beam decoder
 def beam_dec(length,
@@ -2118,26 +2235,26 @@ def slice_words(seqs, segs):
     """
 
     max_length = tf.shape(seqs)[1]
-    seq_masks = tf.greater(seqs, 0)
-    seq_lengths = tf.reduce_sum(tf.to_int32(seq_masks), 1, keepdims=True)
+    padded_seqs = tf.pad(seqs, [[0,0],[1,1]])
+    padded_segs = tf.pad(segs, [[0,0],[1,1]], constant_values=1.0)
+    padded_seq_masks = tf.greater(padded_seqs, 0)
+    padded_seg_masks = tf.reduce_any(tf.stack([padded_seq_masks[:,:-1], padded_seq_masks[:,1:]], axis=-1), axis=-1)
+    padded_segs *= tf.to_float(padded_seg_masks)
 
-    segs *= tf.cast(seq_masks, tf.float32)[:,1:]
-    num_words = tf.reduce_sum(tf.to_int32(segs), axis=1)+1
+    num_words = tf.reduce_sum(tf.to_int32(padded_segs), axis=1)-1
     max_num_word = tf.reduce_max(num_words)
 
     def get_idx(inputs):
-        seg, seq_length, num_word = inputs
-        seg = tf.pad(seg, [[1,0]], constant_values=1.0)
-        idx = tf.range(max_length, dtype=tf.int32)
-        idx = tf.boolean_mask(idx, tf.cast(seg, tf.bool))
-        start = tf.pad(idx, [[0,max_num_word-num_word]])
-        idx = tf.concat([idx, seq_length], axis=0)
+        padded_seg, num_word = inputs
+        idx = tf.range(max_length+1, dtype=tf.int32)
+        idx = tf.boolean_mask(idx, tf.cast(padded_seg, tf.bool))
+        start = tf.pad(idx[:-1], [[0,max_num_word-num_word]])
         length = tf.pad(idx[1:] - idx[:-1], [[0,max_num_word-num_word]])
         return start, length
 
     starts, lengths = tf.map_fn(
         get_idx,
-        [segs, seq_lengths, num_words],
+        [padded_segs, num_words],
         (tf.int32, tf.int32),
         parallel_iterations=128,
         back_prop=False)
