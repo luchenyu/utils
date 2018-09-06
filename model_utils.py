@@ -363,6 +363,42 @@ def GLU(inputs,
         outputs = projs*gates
         return outputs
 
+def GCU(inputs,
+        output_size,
+        kernel_size,
+        dropout=None,
+        is_training=True,
+        reuse=None,
+        scope=None):
+    """ Gated Conv Units.
+
+    """
+
+    with tf.variable_scope(scope,
+                           "GCU",
+                           [inputs],
+                           reuse=reuse) as sc:
+        if dropout != None:
+            inputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+        projs = convolution2d(
+            inputs,
+            output_size,
+            kernel_size,
+            is_training=is_training,
+            scope="projs")
+        gates = convolution2d(
+            inputs,
+            output_size,
+            kernel_size,
+            activation_fn=tf.sigmoid,
+            is_training=is_training,
+            scope="gates")
+        outputs = projs*gates
+        return outputs
+
 def MLP(inputs,
         num_layers,
         hidden_size,
@@ -400,6 +436,42 @@ def MLP(inputs,
                                   output_size,
                                   is_training=is_training,
                                   scope="layer"+str(num_layers-1))
+        return outputs
+
+def highway(inputs,
+            num_layers,
+            activation_fn=tf.nn.relu,
+            dropout=None,
+            is_training=True,
+            reuse=None,
+            scope=None):
+    """ a highway network
+
+    """
+
+    with tf.variable_scope(scope,
+                           "highway",
+                           [inputs],
+                           reuse=reuse) as sc:
+        size = inputs.get_shape()[-1].value
+        if dropout == None:
+            outputs = inputs
+        else:
+            outputs = tf.cond(
+                tf.cast(is_training, tf.bool),
+                lambda: tf.nn.dropout(inputs, dropout),
+                lambda: inputs)
+
+        # residual layers
+        for i in range(num_layers-1):
+            projs = fully_connected(outputs,
+                                    2*size,
+                                    is_training=is_training,
+                                    scope="layer"+str(i))
+            gates, feats = tf.split(projs, 2, axis=-1)
+            gates = tf.sigmoid(gates)
+            feats = activation_fn(feats)
+            outputs = gates*feats + (1.0-gates)*outputs
         return outputs
 
 def ResDNN(inputs,
@@ -931,21 +1003,25 @@ def attention_simple(querys,
             is_training=is_training,
             scope="query_projs")
         querys = tf.stack(tf.split(querys, num_head, axis=-1), axis=1)
+
         keys = fully_connected(
             keys,
             size,
             is_training=is_training,
             scope="key_projs")
         keys = tf.stack(tf.split(keys, num_head, axis=-1), axis=1)
+
         values = fully_connected(
             values,
             size,
             is_training=is_training,
             scope="value_projs")
         values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
+        
 
         logits = tf.matmul(querys, keys, transpose_b=True)
-        logits /= tf.sqrt(tf.to_float(tf.shape(querys)[-1]))
+        logits /= tf.sqrt(tf.to_float(size))
+
         probs = tf.nn.softmax(logits) * tf.expand_dims(tf.to_float(masks), axis=1)
         probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
         attn_feats = tf.matmul(probs, values)
@@ -954,8 +1030,100 @@ def attention_simple(querys,
             attn_feats = tf.squeeze(attn_feats, 1)
     return attn_feats
 
-def position_embedding(inputs):
+def attention_with_position(querys,
+                            keys,
+                            values,
+                            num_head=1,
+                            size=None,
+                            masks=None,
+                            dropout=None,
+                            is_training=True,
+                            reuse=None,
+                            scope=None,):
+    """ implements the attention mechanism
+
+    querys: [batch_size x num_querys x dim]
+    keys: [batch_size x length x dim]
+    values: [batch_size x length x dim]
+    masks: [batch_size x num_querys x length]
+    """
+
+    with tf.variable_scope(scope,
+                           "attention",
+                           [querys, keys, values],
+                           reuse=reuse) as sc:
+        single_query = False
+        if len(querys.get_shape()) == 2:
+            single_query = True
+            querys = tf.expand_dims(querys, 1)
+        if size == None:
+            size = values.get_shape()[-1].value
+
+        querys_content = fully_connected(
+            querys,
+            size,
+            dropout=dropout,
+            is_training=is_training,
+            scope="query_content_projs")
+        querys_content = tf.stack(tf.split(querys_content, num_head, axis=-1), axis=1)
+        query_posits = position_embedding(querys, size)
+        query_posits = tf.expand_dims(query_posits, 1)
+        query_posit_deltas = tf.get_variable(
+            'query_posit_deltas',
+            shape=[num_head, size],
+            dtype=tf.float32,
+            initializer=tf.zeros_initializer(),
+            trainable=(is_training != False))
+        query_posit_deltas = tf.reshape(query_posit_deltas, [1,num_head,1,size])
+        querys_position = translate_position_embeds(query_posits, query_posit_deltas)
+
+        keys_content = fully_connected(
+            keys,
+            size,
+            dropout=dropout,
+            is_training=is_training,
+            scope="key_content_projs")
+        keys_content = tf.stack(tf.split(keys_content, num_head, axis=-1), axis=1)
+        keys_position = position_embedding(keys, size)
+        keys_position = tf.tile(tf.expand_dims(keys_position, 1), [1,num_head,1,1])
+
+        values = fully_connected(
+            values,
+            size,
+            dropout=dropout,
+            is_training=is_training,
+            scope="value_projs")
+        values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
+        
+
+        logits_content = tf.matmul(querys_content, keys_content, transpose_b=True)
+        logits_position = tf.matmul(querys_position, keys_position, transpose_b=True)
+        #logits_position /= tf.sqrt(tf.to_float(size))
+        logits = logits_content + logits_position
+
+        probs = tf.nn.softmax(logits) * \
+            tf.expand_dims(tf.to_float(masks), axis=1)
+        probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
+        attn_feats = tf.matmul(probs, values)
+       # attn_posits = tf.matmul(probs, values_position)
+       # cos, sin = tf.split(query_posits, 2, axis=-1)
+       # query_posits = tf.concat([cos, -sin], axis=-1)
+       # query_posits = tf.tile(tf.expand_dims(query_posits, 1), [1,num_head,1,1])
+       # attn_posits = translate_position_embeds(attn_posits, query_posits)
+       # attn_feats += fully_connected(
+       #     attn_posits,
+       #     size/num_head,
+       #     is_training=is_training,
+       #     scope="attn_posit_projs")
+        attn_feats = tf.concat(tf.unstack(attn_feats, axis=1), axis=-1)
+        if single_query:
+            attn_feats = tf.squeeze(attn_feats, 1)
+    return attn_feats
+
+def position_embedding(inputs, size=None):
     batch_size,seq_len,position_size = map(lambda i: tf.squeeze(i), tf.split(tf.shape(inputs), 3, axis=0))
+    if size != None:
+        position_size = size
     position_size = tf.to_float(position_size)
     position_j = 1. / tf.pow(10000., \
                              2 * tf.range(position_size / 2, dtype=tf.float32 \
@@ -969,8 +1137,25 @@ def position_embedding(inputs):
                          + tf.zeros([batch_size, seq_len, tf.to_int32(position_size)])
     return position_embedding
 
+def translate_position_embeds(position_embeds, delta):
+    position_embeds = tf.stack(tf.split(position_embeds, 2, axis=-1), axis=-1)
+    cos, sin = tf.split(delta, 2, axis=-1)
+    #norm = tf.sqrt(tf.square(cos)+tf.square(sin)) + 1e-20
+    #cos /= norm
+    #sin /= norm
+    new_cos = tf.reduce_sum(
+        position_embeds*tf.stack([cos, -sin], axis=-1),
+        axis=-1)
+    new_sin = tf.reduce_sum(
+        position_embeds*tf.stack([sin, cos], axis=-1),
+        axis=-1)
+    new_position_embeds = tf.concat([new_cos, new_sin], axis=-1)
+    return new_position_embeds
+
 def transformer(inputs,
                 num_layers,
+                masks,
+                dropout=None,
                 is_training=True,
                 reuse=None,
                 scope=None):
@@ -984,19 +1169,20 @@ def transformer(inputs,
         batch_size = tf.shape(inputs)[0]
         length = tf.shape(inputs)[1]
         size = inputs.get_shape()[-1].value
-        posit_embeds = position_embedding(inputs)
-        inputs += posit_embeds
-        masks = tf.sequence_mask(tf.tile(tf.expand_dims(tf.range(length)+1, 0), [batch_size, 1]))
+        masks = tf.logical_and(
+            tf.sequence_mask(tf.tile(tf.expand_dims(tf.range(length)+1, 0), [batch_size, 1])),
+            masks)
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                inputs += attention_simple(inputs, inputs, inputs,
-                    num_head=8, size=size, masks=masks, is_training=is_training)
+                inputs += attention_with_position(inputs, inputs, inputs,
+                    num_head=8, size=size, masks=masks, dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
                     inputs,
                     2,
                     2*size,
                     size,
+                    dropout=dropout,
                     is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
         outputs = inputs
@@ -1004,6 +1190,8 @@ def transformer(inputs,
 
 def transformer2(inputs,
                  num_layers,
+                 masks,
+                 dropout=None,
                  is_training=True,
                  reuse=None,
                  scope=None):
@@ -1017,21 +1205,21 @@ def transformer2(inputs,
         batch_size = tf.shape(inputs)[0]
         length = tf.shape(inputs)[1]
         size = inputs.get_shape()[-1].value
-        posit_embeds = position_embedding(inputs)
-        inputs += posit_embeds
-        masks = tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool))
-        padded_inputs = tf.pad(inputs, [[0,0],[1,1],[0,0]])
-        contexts = padded_inputs[:,:-2] + padded_inputs[:,2:]
+        masks = tf.logical_and(
+            tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)),
+            masks)
+        contexts = tf.zeros([batch_size, length, size])
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                contexts += attention_simple(contexts, inputs, inputs,
-                    num_head=8, size=size, masks=masks, is_training=is_training)
+                contexts += attention_with_position(contexts, inputs, inputs,
+                    num_head=8, size=size, masks=masks, dropout=dropout, is_training=is_training)
                 contexts = tf.contrib.layers.layer_norm(contexts, begin_norm_axis=-1)
                 contexts += MLP(
                     contexts,
                     2,
                     2*size,
                     size,
+                    dropout=dropout,
                     is_training=is_training)
                 contexts = tf.contrib.layers.layer_norm(contexts, begin_norm_axis=-1)
     return contexts
@@ -1804,30 +1992,25 @@ def stochastic_dec(length,
         if isinstance(initial_state, tuple) else \
         tf.shape(initial_state)[0]
     inputs_size = input_embedding.get_shape()[1].value
-    inputs = tf.nn.embedding_lookup(
-        input_embedding, tf.zeros([batch_size], dtype=tf.int32))
 
-    outputs, state = cell(inputs, initial_state)
-    logits = logit_fn(outputs)
-
-    symbol = tf.to_int32(tf.reshape(tf.multinomial(logits, num_candidates), [-1]))
-    score = tf.reduce_sum(tf.one_hot(symbol, tf.shape(logits)[1]) * logits, axis=1)
-    mask = tf.equal(symbol, 0)
-    seq = [symbol]
-    scores = [score]
-    tf.get_variable_scope().reuse_variables()
-
-    beam_parents = tf.reshape(
-        tf.tile(tf.expand_dims(tf.range(batch_size), 1),
-                [1, num_candidates]), [-1])
+    seqs = tf.zeros([batch_size*num_candidates, 1], dtype=tf.int32)
+    scores = tf.zeros([batch_size*num_candidates, 1], dtype=tf.float32)
+    state = initial_state
     if isinstance(state, tuple):
-        state = tuple([tf.gather(s, beam_parents) for s in state])
+        state = tuple([tf.reshape(
+            tf.tile(tf.expand_dims(s, 1), [1,num_candidates,1]),
+            [batch_size*num_candidates, -1]) for s in state])
     else:
-        state = tf.gather(state, beam_parents)
+        state = tf.reshape(
+            tf.tile(tf.expand_dims(state, 1), [1,num_candidates,1]),
+            [batch_size*num_candidates, -1])
+    mask = tf.zeros([batch_size*num_candidates], dtype=tf.bool)
 
-    for _ in range(length-1):
+    def cond(seqs, scores, state, mask, i):
+        return tf.less(i, length)
 
-        inputs = tf.nn.embedding_lookup(input_embedding, symbol)
+    def body(seqs, scores, state, mask, i):
+        inputs = tf.nn.embedding_lookup(input_embedding, seqs[:,-1])
 
         outputs, state = cell(inputs, state)
         logits = logit_fn(outputs)
@@ -1839,11 +2022,22 @@ def stochastic_dec(length,
                           tf.to_int32(symbol))
         score *= tf.to_float(tf.logical_not(mask))
         mask = tf.equal(symbol, 0)
-        seq.append(symbol)
-        scores.append(score)
-    candidates = tf.reshape(tf.stack(seq, 1), [batch_size, num_candidates, length])
+        seqs = tf.concat([seqs, tf.expand_dims(symbol, 1)], axis=1)
+        scores = tf.concat([scores, tf.expand_dims(score, 1)], axis=1)
+        i += 1
+        return seqs, scores, state, mask, i
+
+    if isinstance(state, tuple):
+        state_shape = tuple([s.get_shape() for s in state])
+    else:
+        state_shape = state.get_shape()
+    seqs, scores, state, mask, i = tf.while_loop(
+        cond, body, [seqs, scores, state, mask, 0],
+        [tf.TensorShape([None,None])]*2 + [state_shape, mask.get_shape(), tf.TensorShape([])],
+        back_prop=False)
+    candidates = tf.reshape(seqs[:,1:], [batch_size, num_candidates, length])
     scores = tf.reshape(
-        tf.reduce_sum(tf.stack(scores, axis=-1), axis=-1),
+        tf.reduce_sum(scores, axis=-1),
         [batch_size, num_candidates])
 
     return candidates, scores
@@ -2226,7 +2420,7 @@ def slice_fragments(inputs, starts, lengths):
 
     return tf.reshape(fragments, [batch, beam_size, max_length, features])
 
-def slice_words(seqs, segs):
+def slice_words(seqs, segs, encodes=None):
     """
     slice seqs into pieces of words.
     
@@ -2263,5 +2457,41 @@ def slice_words(seqs, segs):
         tf.to_float(tf.expand_dims(seqs, axis=-1)),
         starts,
         lengths)
+    segmented_seqs = tf.to_int32(tf.squeeze(segmented_seqs, axis=-1))
 
-    return tf.to_int32(tf.squeeze(segmented_seqs, axis=-1))
+    if encodes != None:
+        segmented_encodes = slice_fragments(
+            encodes,
+            starts,
+            lengths)
+        return segmented_seqs, segmented_encodes
+    else:
+        return segmented_seqs
+
+def stitch_chars(segmented_seqs):
+    """
+    stitch segmented seqs into seq of chars.
+    
+    segmented_seqs: seqs to stitch
+    """
+
+    masks = tf.greater(segmented_seqs, 0)
+    num_chars = tf.reduce_sum(tf.to_int32(masks), axis=[1,2])
+    max_num_char = tf.reduce_max(num_chars)
+
+    def stitch(segmented_seq):
+        mask = tf.greater(segmented_seq, 0)
+        seq = tf.boolean_mask(
+            segmented_seq,
+            mask)
+        num_char = tf.shape(seq)[0]
+        seq = tf.pad(seq, [[0,max_num_char-num_char]])
+        return seq
+
+    seqs = tf.map_fn(
+        stitch,
+        segmented_seqs,
+        tf.int32,
+        parallel_iterations=128,
+        back_prop=False)
+    return seqs
