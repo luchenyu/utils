@@ -975,6 +975,7 @@ def attention_simple(querys,
                      num_head=1,
                      size=None,
                      masks=None,
+                     dropout=None,
                      is_training=True,
                      reuse=None,
                      scope=None,):
@@ -1000,6 +1001,7 @@ def attention_simple(querys,
         querys = fully_connected(
             querys,
             size,
+            dropout=dropout,
             is_training=is_training,
             scope="query_projs")
         querys = tf.stack(tf.split(querys, num_head, axis=-1), axis=1)
@@ -1007,6 +1009,7 @@ def attention_simple(querys,
         keys = fully_connected(
             keys,
             size,
+            dropout=dropout,
             is_training=is_training,
             scope="key_projs")
         keys = tf.stack(tf.split(keys, num_head, axis=-1), axis=1)
@@ -1014,6 +1017,7 @@ def attention_simple(querys,
         values = fully_connected(
             values,
             size,
+            dropout=dropout,
             is_training=is_training,
             scope="value_projs")
         values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
@@ -1056,6 +1060,7 @@ def attention_with_position(querys,
         if len(querys.get_shape()) == 2:
             single_query = True
             querys = tf.expand_dims(querys, 1)
+            masks = tf.expand_dims(masks, 1)
         if size == None:
             size = values.get_shape()[-1].value
 
@@ -1174,7 +1179,8 @@ def transformer(inputs,
             masks)
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                inputs += attention_with_position(inputs, inputs, inputs,
+                pinputs = inputs + position_embedding(inputs)
+                inputs += attention_simple(pinputs, pinputs, inputs,
                     num_head=8, size=size, masks=masks, dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
@@ -1189,6 +1195,7 @@ def transformer(inputs,
     return outputs
 
 def transformer2(inputs,
+                 encodes,
                  num_layers,
                  masks,
                  dropout=None,
@@ -1208,21 +1215,21 @@ def transformer2(inputs,
         masks = tf.logical_and(
             tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)),
             masks)
-        contexts = tf.zeros([batch_size, length, size])
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                contexts += attention_with_position(contexts, inputs, inputs,
+                inputs += attention_with_position(inputs, encodes, encodes,
                     num_head=8, size=size, masks=masks, dropout=dropout, is_training=is_training)
-                contexts = tf.contrib.layers.layer_norm(contexts, begin_norm_axis=-1)
-                contexts += MLP(
-                    contexts,
+                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+                inputs += MLP(
+                    inputs,
                     2,
                     2*size,
                     size,
                     dropout=dropout,
                     is_training=is_training)
-                contexts = tf.contrib.layers.layer_norm(contexts, begin_norm_axis=-1)
-    return contexts
+                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+    outputs = inputs
+    return outputs
 
 def read(query,
          keys,
@@ -1833,8 +1840,8 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                     copy_logits.append(attn_logits)
             outputs = [tf.concat([cell_outputs,] + attn_feats, 1),]
             outputs = tuple(
-                outputs + [tuple(copy_logits),]
-                if len(copy_logits) > 0 else outputs[0])
+                outputs + [tuple(copy_logits),]) \
+                if len(copy_logits) > 0 else outputs[0]
             cell_state = cell_state if isinstance(cell_state, (tuple, list)) else (cell_state,)
             state = []
             for i in range(self.num_attention):
@@ -2431,9 +2438,12 @@ def slice_words(seqs, segs, encodes=None):
     max_length = tf.shape(seqs)[1]
     padded_seqs = tf.pad(seqs, [[0,0],[1,1]])
     padded_segs = tf.pad(segs, [[0,0],[1,1]], constant_values=1.0)
+    padded_segs = tf.cast(padded_segs, tf.bool)
     padded_seq_masks = tf.greater(padded_seqs, 0)
-    padded_seg_masks = tf.reduce_any(tf.stack([padded_seq_masks[:,:-1], padded_seq_masks[:,1:]], axis=-1), axis=-1)
-    padded_segs *= tf.to_float(padded_seg_masks)
+    padded_seg_masks1 = tf.logical_or(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
+    padded_segs = tf.logical_and(padded_segs, padded_seg_masks1)
+    padded_seg_masks2 = tf.logical_xor(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
+    padded_segs = tf.logical_or(padded_segs, padded_seg_masks2)
 
     num_words = tf.reduce_sum(tf.to_int32(padded_segs), axis=1)-1
     max_num_word = tf.reduce_max(num_words)
@@ -2441,7 +2451,7 @@ def slice_words(seqs, segs, encodes=None):
     def get_idx(inputs):
         padded_seg, num_word = inputs
         idx = tf.range(max_length+1, dtype=tf.int32)
-        idx = tf.boolean_mask(idx, tf.cast(padded_seg, tf.bool))
+        idx = tf.boolean_mask(idx, padded_seg)
         start = tf.pad(idx[:-1], [[0,max_num_word-num_word]])
         length = tf.pad(idx[1:] - idx[:-1], [[0,max_num_word-num_word]])
         return start, length
