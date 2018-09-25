@@ -1,11 +1,13 @@
 
 import gensim, os, re, sys
 import numpy as np
+import unicodedata
 import jieba
 import jieba.posseg as pseg
 import thulac
 from pyltp import Segmentor
 from pyltp import Postagger
+from hanziconv import HanziConv
 import synonyms
 
 WORD2VEC = None
@@ -280,6 +282,10 @@ class Synonyms(object):
                 results = []
         return results
 
+def normalize(text):
+    text = unicodedata.normalize('NFKC', text.decode('utf-8')).encode('utf-8')
+    text = HanziConv.toSimplified(text)
+    return text
 
 def posseg_to_token_ids(pos_segs, vocab, posseg_vocab):
     """

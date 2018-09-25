@@ -1120,12 +1120,16 @@ def attention_with_position(querys,
         if use_position:
             logits += tf.matmul(query_position_embeds, key_position_embeds, transpose_b=True)
         logits /= tf.sqrt(float(size))
-        logits = logits * \
-            tf.expand_dims(tf.to_float(masks), axis=1) if masks != None else logits
-        logits -= tf.stop_gradient(tf.reduce_mean(logits, axis=-1, keepdims=True))
+        if masks != None:
+            weights = tf.expand_dims(tf.to_float(masks), axis=1)
+        else:
+            weights = tf.ones(tf.shape(logits))
+        logits -= tf.stop_gradient(
+            tf.reduce_sum(logits*weights, axis=-1, keepdims=True) / \
+            (tf.reduce_sum(weights, axis=-1, keepdims=True)+1e-20))
+        logits = logits * weights
 
-        probs = tf.exp(logits) * \
-            tf.expand_dims(tf.to_float(masks), axis=1) if masks != None else tf.exp(logits)
+        probs = tf.nn.softmax(logits) * weights
         probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
         attn_feats = tf.matmul(probs, values)
        # attn_posits = tf.matmul(probs, values_position)
@@ -1247,12 +1251,12 @@ def transformer2(inputs,
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
                 inputs += attention_with_position(inputs, encodes, encodes,
-                    num_head=8, size=size, masks=masks, dropout=dropout, is_training=is_training)
+                    num_head=4, size=size, masks=masks, dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
                     inputs,
                     2,
-                    2*size,
+                    size,
                     size,
                     dropout=dropout,
                     is_training=is_training)
@@ -1780,12 +1784,10 @@ class AttentionCell(object):
 
     def __init__(self,
                  size,
-                 vocab_dim,
                  num_layer=3,
                  dropout=None,
                  is_training=True):
         self.size=size
-        self.vocab_dim=vocab_dim
         self.num_layer=num_layer
         self.dropout=dropout
         self.is_training=is_training
@@ -1797,6 +1799,7 @@ class AttentionCell(object):
                  scope=None):
         with tf.variable_scope(scope or "Attn_Cell", reuse=reuse) as sc:
             batch_size = tf.shape(inputs)[0]
+            input_size = inputs.get_shape()[-1].value
             decoder_inputs = state[0]
             encodes = state[1::2]
             masks = state[2::2]
@@ -1804,7 +1807,7 @@ class AttentionCell(object):
                 idx = decoder_inputs.size()
                 decoder_inputs_tensor = tf.cond(
                     tf.greater(idx, 0),
-                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, self.vocab_dim]),
+                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, input_size]),
                         tf.expand_dims(inputs, 1)], axis=1),
                     lambda: tf.expand_dims(inputs, 1))
                 state = tuple([decoder_inputs.write(idx, decoder_inputs_tensor)] + list(state[1:]))
@@ -1816,10 +1819,10 @@ class AttentionCell(object):
                 idx = decoder_inputs.size()
                 decoder_inputs_tensor = tf.cond(
                     tf.greater(idx, 0),
-                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, self.vocab_dim]),
+                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, input_size]),
                         inputs], axis=1),
                     lambda: inputs)
-                decoder_inputs_tensor = tf.reshape(decoder_inputs_tensor, [batch_size, -1, self.vocab_dim])
+                decoder_inputs_tensor = tf.reshape(decoder_inputs_tensor, [batch_size, -1, input_size])
                 state = tuple([decoder_inputs.write(idx, decoder_inputs_tensor)] + list(state[1:]))
                 length = tf.shape(inputs)[1]
                 inputs = tf.zeros([batch_size, length, self.size])
@@ -1840,7 +1843,19 @@ class AttentionCell(object):
                         query_position_idxs=position_idxs,
                         dropout=self.dropout,
                         is_training=self.is_training)
-                    inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+                    outputs = inputs
+                    for i in range(len(encodes)):
+                        outputs += attention_with_position(
+                            inputs,
+                            encodes[i],
+                            encodes[i],
+                            size=self.size,
+                            num_head=4,
+                            masks=masks[i],
+                            query_position_idxs=position_idxs,
+                            dropout=self.dropout,
+                            is_training=self.is_training)
+                    inputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
                     inputs += MLP(
                         inputs,
                         2,
@@ -1849,36 +1864,7 @@ class AttentionCell(object):
                         dropout=self.dropout,
                         is_training=self.is_training)
                     inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-            dec_attn_feats = inputs
-            enc_attn_feats = []
-            for i in range(len(encodes)):
-                with tf.variable_scope("encode_{:d}".format(i)):
-                    outputs = attention_with_position(
-                        dec_attn_feats,
-                        encodes[i],
-                        encodes[i],
-                        size=self.size,
-                        num_head=4,
-                        masks=masks[i],
-                        query_position_idxs=position_idxs,
-                        dropout=self.dropout,
-                        is_training=self.is_training)
-                    outputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
-                    outputs += MLP(
-                        outputs,
-                        2,
-                        2*self.size,
-                        self.size,
-                        dropout=self.dropout,
-                        is_training=self.is_training)
-                    outputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
-                    enc_attn_feats.append(outputs)
-            outputs = fully_connected(
-                tf.concat([dec_attn_feats]+enc_attn_feats, axis=-1),
-                self.size,
-                activation_fn=tf.tanh,
-                is_training=self.is_training,
-                scope="attn_projs")
+            outputs = inputs
         return outputs, state
 
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
@@ -2154,29 +2140,29 @@ def stochastic_dec(length,
 
     """
 
-    batch_size = tf.shape(initial_state[0])[0] \
+    batch_size = tf.shape(initial_state[-1])[0] \
         if isinstance(initial_state, tuple) else \
         tf.shape(initial_state)[0]
     inputs_size = input_embedding.get_shape()[1].value
 
-    seqs = tf.zeros([batch_size*num_candidates, 1], dtype=tf.int32)
-    scores = tf.zeros([batch_size*num_candidates, 1], dtype=tf.float32)
     state = initial_state
-    if isinstance(state, tuple):
-        state = tuple([tf.reshape(
-            tf.tile(tf.expand_dims(s, 1), [1,num_candidates,1]),
-            [batch_size*num_candidates, -1]) for s in state])
-    else:
-        state = tf.reshape(
-            tf.tile(tf.expand_dims(state, 1), [1,num_candidates,1]),
-            [batch_size*num_candidates, -1])
+    beam_parent = tf.tile(
+        tf.expand_dims(tf.range(batch_size), axis=1),
+        [1, num_candidates])
+    beam_parent = tf.reshape(beam_parent, [batch_size*num_candidates])
+    state = gather_state(state, beam_parent)
     mask = tf.zeros([batch_size*num_candidates], dtype=tf.bool)
+
+    seqs = tf.TensorArray(tf.int32, size=0, dynamic_size=True, clear_after_read=False)
+    seqs = seqs.write(0, tf.zeros([batch_size*num_candidates], dtype=tf.int32))
+    scores = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
+    scores = scores.write(0, tf.zeros([batch_size*num_candidates]))
 
     def cond(seqs, scores, state, mask, i):
         return tf.less(i, length)
 
     def body(seqs, scores, state, mask, i):
-        inputs = tf.nn.embedding_lookup(input_embedding, seqs[:,-1])
+        inputs = tf.nn.embedding_lookup(input_embedding, seqs.read(i))
 
         outputs, state = cell(inputs, state)
         logits = logit_fn(outputs)
@@ -2188,22 +2174,17 @@ def stochastic_dec(length,
                           tf.to_int32(symbol))
         score *= tf.to_float(tf.logical_not(mask))
         mask = tf.equal(symbol, 0)
-        seqs = tf.concat([seqs, tf.expand_dims(symbol, 1)], axis=1)
-        scores = tf.concat([scores, tf.expand_dims(score, 1)], axis=1)
+        seqs = seqs.write(i+1, symbol)
+        scores = scores.write(i+1, score)
         i += 1
         return seqs, scores, state, mask, i
 
-    if isinstance(state, tuple):
-        state_shape = tuple([s.get_shape() for s in state])
-    else:
-        state_shape = state.get_shape()
     seqs, scores, state, mask, i = tf.while_loop(
         cond, body, [seqs, scores, state, mask, 0],
-        [tf.TensorShape([None,None])]*2 + [state_shape, mask.get_shape(), tf.TensorShape([])],
         back_prop=False, swap_memory=True)
-    candidates = tf.reshape(seqs[:,1:], [batch_size, num_candidates, length])
+    candidates = tf.reshape(tf.transpose(seqs.stack(), [1,0])[:,1:], [batch_size, num_candidates, length])
     scores = tf.reshape(
-        tf.reduce_sum(scores, axis=-1),
+        tf.reduce_sum(scores.stack(), axis=0),
         [batch_size, num_candidates])
 
     return candidates, scores
@@ -2221,7 +2202,7 @@ def beam_dec(length,
 
     """
 
-    batch_size = tf.shape(initial_state[0])[0] \
+    batch_size = tf.shape(initial_state[-1])[0] \
         if isinstance(initial_state, tuple) else \
         tf.shape(initial_state)[0]
     inputs_size = input_embedding.get_shape()[1].value
@@ -2239,24 +2220,25 @@ def beam_dec(length,
 
     symbols = indices % vocab_size + 1
     beam_parent = indices // (vocab_size - 1)
-    beam_parent = tf.reshape(
-        tf.expand_dims(tf.range(batch_size), 1) + beam_parent, [-1])
+    beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size), 1)+beam_parent, [-1])
     paths = tf.reshape(symbols, [-1, 1])
 
-    candidates = [tf.to_int32(tf.zeros([batch_size, 1, length]))]
-    scores = [tf.slice(prev, [0, 0], [-1, 1])]
+    state = gather_state(state, beam_parent)
 
     tf.get_variable_scope().reuse_variables()
+    paths = tf.TensorArray(tf.int32, size=0,
+        dynamic_size=True, infer_shape=False).write(0, paths)
+    candidates = tf.TensorArray(tf.int32, size=0, dynamic_size=True, clear_after_read=False)
+    scores = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
 
-    for i in range(length-1):
+    def cond(paths, candidates, scores, state, best_probs, i):
+        return tf.less(i, length)
 
-        if isinstance(state, tuple):
-            state = tuple([tf.gather(s, beam_parent) for s in state])
-        else:
-            state = tf.gather(state, beam_parent)
+    def body(paths, candidates, scores, state, best_probs, i):
 
-        inputs = tf.reshape(tf.nn.embedding_lookup(input_embedding, symbols),
-                            [-1, inputs_size])
+        pths = paths.read(i)
+        pths = tf.reshape(pths, [tf.shape(best_probs)[0]*tf.shape(best_probs)[1], -1])
+        inputs = tf.nn.embedding_lookup(input_embedding, pths[:,-1])
 
         # iter
         outputs, state = cell(inputs, state)
@@ -2270,48 +2252,49 @@ def beam_dec(length,
         fn = lambda seq: tf.size(tf.unique(seq)[0])
         uniq_len = tf.reshape(
             tf.to_float(tf.map_fn(fn,
-                                  paths,
+                                  pths,
                                   dtype=tf.int32,
                                   parallel_iterations=100000,
                                   back_prop=False,
-                                  swap_memory=True,
-                                  infer_shape=False)),
+                                  swap_memory=True)),
             [batch_size, beam_size])
-        if gamma == 0.0:
-            close_score = best_probs + tf.squeeze(
-                tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
-        else:
-            close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
-                tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
-        candidates.append(tf.reshape(tf.pad(paths,
-                                            [[0, 0], [0, length-1-i]],
-                                            "CONSTANT"),
-                                     [batch_size, beam_size, length]))
-        scores.append(close_score)
+        close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
+            tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
+
+        candidates = candidates.write(i, tf.reshape(
+            tf.pad(pths, [[0, 0],[0, length-i-1]], "CONSTANT"),
+            [batch_size, beam_size, length]))
+        scores = scores.write(i, close_score)
 
         prev += tf.expand_dims(best_probs, 2)
-        probs = tf.reshape(
-            tf.slice(prev, [0, 0, 1], [-1, -1, -1]), [batch_size, -1])
+        probs = tf.reshape(tf.slice(prev, [0, 0, 1], [-1, -1, -1]), [batch_size, -1])
         best_probs, indices = tf.nn.top_k(probs, beam_size)
 
         symbols = indices % (vocab_size - 1) + 1
         beam_parent = indices // (vocab_size - 1)
-        beam_parent = tf.reshape(
-            tf.expand_dims(tf.range(batch_size) * beam_size, 1) + beam_parent,
-            [-1])
-        paths = tf.gather(paths, beam_parent)
-        paths = tf.concat([paths, tf.reshape(symbols, [-1, 1])], 1)
+        beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size)*beam_size, 1)+beam_parent, [-1])
+        pths = tf.gather(pths, beam_parent)
+        pths = tf.concat([pths, tf.reshape(symbols, [-1, 1])], axis=1)
+        paths = paths.write(i+1, pths)
+
+        state = gather_state(state, beam_parent)
+        i += 1
+
+        return paths, candidates, scores, state, best_probs, i
+
+    _, candidates, scores, _, _, _ = tf.while_loop(
+        cond, body, [paths, candidates, scores, state, best_probs, 0],
+        back_prop=False, parallel_iterations=128, swap_memory=True)
 
     # pick the topk from the candidates in the lists
-    candidates = tf.reshape(tf.concat(candidates, 1), [-1, length])
-    scores = tf.concat(scores, 1)
+    candidates = tf.reshape(tf.transpose(candidates.stack(), [1,0,2,3]), [-1, length])
+    scores = tf.reshape(tf.transpose(scores.stack(), [1,0,2]), [batch_size, -1])
     best_scores, indices = tf.nn.top_k(scores, num_candidates)
     indices = tf.reshape(
         tf.expand_dims(
             tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices,
         [-1])
-    best_candidates = tf.reshape(tf.gather(candidates, indices),
-                                 [batch_size, num_candidates, length])
+    best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
 
     return best_candidates, best_scores
 
@@ -2347,10 +2330,8 @@ def stochastic_beam_dec(length,
 
     symbols = indices % vocab_size + 1
     beam_parent = indices // (vocab_size - 1)
-    beam_parent = tf.reshape(
-        tf.expand_dims(tf.range(batch_size), 1) + beam_parent,
-        [-1])
-    paths = tf.reshape(symbols, [-1,1])
+    beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size), 1)+beam_parent, [-1])
+    paths = tf.reshape(symbols, [-1, 1])
 
     state = gather_state(state, beam_parent)
 
@@ -2393,6 +2374,7 @@ def stochastic_beam_dec(length,
                                   pths,
                                   dtype=tf.int32,
                                   parallel_iterations=100000,
+                                  back_prop=False,
                                   swap_memory=True)),
             [batch_size, beam_size])
         close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
@@ -2412,13 +2394,12 @@ def stochastic_beam_dec(length,
         scores = scores.write(i, close_score)
 
         prev += tf.expand_dims(best_probs, 2)
-        probs = tf.reshape(tf.slice(prev, [0, 0, 1], [-1, -1, -1]),
-                           [batch_size, -1])
+        probs = tf.reshape(tf.slice(prev, [0, 0, 1], [-1, -1, -1]), [batch_size, -1])
         best_probs, indices = tf.nn.top_k(probs, beam_size)
 
         symbols = indices % (vocab_size - 1) + 1
         beam_parent = indices // (vocab_size - 1)
-        beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size) * beam_size, 1) + beam_parent, [-1])
+        beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size)*beam_size, 1)+beam_parent, [-1])
         pths = tf.gather(pths, beam_parent)
         pths = tf.concat([pths, tf.reshape(symbols, [-1,1])], axis=1)
         paths = paths.write(i+1, pths)
