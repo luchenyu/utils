@@ -1832,7 +1832,7 @@ class AttentionCell(object):
                 end_idx = tf.shape(decoder_inputs_tensor)[1] + 1
                 position_idxs = tf.tile(tf.expand_dims(tf.range(start_idx, end_idx), 0), [batch_size, 1])
                 dec_masks = tf.sequence_mask(position_idxs)
-                masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,length,1]), masks)
+                masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,length,1]) if m.shape.ndims == 2 else m, masks)
             for i in range(self.num_layer):
                 with tf.variable_scope("layer_{:d}".format(i)):
                     inputs += attention_with_position(
@@ -2614,6 +2614,11 @@ def slice_words(seqs, segs, encodes=None):
         back_prop=False,
         swap_memory=True)
 
+    idx_starts = tf.to_int32(tf.logical_not(tf.sequence_mask(starts, max_length)))
+    idx_ends = tf.sequence_mask(starts+lengths, max_length, dtype=tf.int32)
+    idx_ends *= tf.expand_dims(tf.expand_dims(tf.range(1, max_num_word+1, dtype=tf.int32), 0), 2)
+    segment_idxs = tf.reduce_sum(idx_starts * idx_ends, axis=1)-1
+
     segmented_seqs = slice_fragments(
         tf.to_float(tf.expand_dims(seqs, axis=-1)),
         starts,
@@ -2625,9 +2630,9 @@ def slice_words(seqs, segs, encodes=None):
             encodes,
             starts,
             lengths)
-        return segmented_seqs, segmented_encodes
+        return segmented_seqs, segment_idxs, segmented_encodes
     else:
-        return segmented_seqs
+        return segmented_seqs, segment_idxs
 
 def stitch_chars(segmented_seqs):
     """
@@ -2653,7 +2658,7 @@ def stitch_chars(segmented_seqs):
         stitch,
         segmented_seqs,
         tf.int32,
-        parallel_iterations=10000,
+        parallel_iterations=128,
         back_prop=False,
         swap_memory=True)
     return seqs
