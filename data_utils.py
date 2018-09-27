@@ -7,7 +7,7 @@ import jieba.posseg as pseg
 import thulac
 from pyltp import Segmentor
 from pyltp import Postagger
-from hanziconv import HanziConv
+import pyopencc
 import synonyms
 
 WORD2VEC = None
@@ -282,9 +282,10 @@ class Synonyms(object):
                 results = []
         return results
 
+zht2zhs = pyopencc.OpenCC('zht2zhs.ini').convert
 def normalize(text):
     text = unicodedata.normalize('NFKC', text.decode('utf-8')).encode('utf-8')
-    text = HanziConv.toSimplified(text)
+    text = zht2zhs(text)
     return text
 
 def posseg_to_token_ids(pos_segs, vocab, posseg_vocab):
