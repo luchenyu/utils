@@ -21,6 +21,7 @@ from tensorflow.python.util import nest
 
 def fully_connected(inputs,
                     num_outputs,
+                    weight_normalize=True,
                     activation_fn=None,
                     dropout=None,
                     is_training=True,
@@ -68,7 +69,7 @@ def fully_connected(inputs,
             initializer=tf.contrib.layers.xavier_initializer(),
             collections=weights_collections,
             trainable=trainable)
-        if trainable:
+        if trainable and weight_normalize:
             norm_op = weights.assign(
                 tf.nn.l2_normalize(
                     weights, 0) * tf.exp(weights_norm))
@@ -117,6 +118,7 @@ def convolution2d(inputs,
                   dilation_rates=None,
                   pool_size=None,
                   group_size=None,
+                  weight_normalize=True,
                   activation_fn=None,
                   dropout=None,
                   is_training=True,
@@ -171,7 +173,7 @@ def convolution2d(inputs,
                     initializer=tf.contrib.layers.xavier_initializer(),
                     collections=weights_collections,
                     trainable=trainable)
-                if is_training != False:
+                if is_training != False and weight_normalize:
                     norm_op = weights.assign(
                         tf.nn.l2_normalize(
                             weights, [0,1,2]) * tf.exp(weights_norm))
@@ -2651,7 +2653,7 @@ def stitch_chars(segmented_seqs):
         stitch,
         segmented_seqs,
         tf.int32,
-        parallel_iterations=128,
+        parallel_iterations=10000,
         back_prop=False,
         swap_memory=True)
     return seqs
