@@ -2577,7 +2577,7 @@ def slice_fragments(inputs, starts, lengths):
 
     return tf.reshape(fragments, [batch, beam_size, max_length, features])
 
-def slice_words(seqs, segs, encodes=None):
+def slice_words(seqs, segs, get_idxs=False, encodes=None):
     """
     slice seqs into pieces of words.
     
@@ -2603,7 +2603,9 @@ def slice_words(seqs, segs, encodes=None):
         idx = tf.range(max_length+1, dtype=tf.int32)
         idx = tf.boolean_mask(idx, padded_seg)
         start = tf.pad(idx[:-1], [[0,max_num_word-num_word]])
+        start = tf.reshape(start, [max_num_word])
         length = tf.pad(idx[1:] - idx[:-1], [[0,max_num_word-num_word]])
+        length = tf.reshape(length, [max_num_word])
         return start, length
 
     starts, lengths = tf.map_fn(
@@ -2614,25 +2616,33 @@ def slice_words(seqs, segs, encodes=None):
         back_prop=False,
         swap_memory=True)
 
-    idx_starts = tf.to_int32(tf.logical_not(tf.sequence_mask(starts, max_length)))
-    idx_ends = tf.sequence_mask(starts+lengths, max_length, dtype=tf.int32)
-    idx_ends *= tf.expand_dims(tf.expand_dims(tf.range(1, max_num_word+1, dtype=tf.int32), 0), 2)
-    segment_idxs = tf.reduce_sum(idx_starts * idx_ends, axis=1)-1
+    results = []
 
     segmented_seqs = slice_fragments(
         tf.to_float(tf.expand_dims(seqs, axis=-1)),
         starts,
         lengths)
     segmented_seqs = tf.to_int32(tf.squeeze(segmented_seqs, axis=-1))
+    results.append(segmented_seqs)
+
+    if get_idxs:
+        idx_starts = tf.to_int32(tf.logical_not(tf.sequence_mask(starts, max_length)))
+        idx_ends = tf.sequence_mask(starts+lengths, max_length, dtype=tf.int32)
+        idx_ends *= tf.expand_dims(tf.expand_dims(tf.range(1, max_num_word+1, dtype=tf.int32), 0), 2)
+        segment_idxs = tf.reduce_sum(idx_starts * idx_ends, axis=1)-1
+        results.append(segment_idxs)
 
     if encodes != None:
         segmented_encodes = slice_fragments(
             encodes,
             starts,
             lengths)
-        return segmented_seqs, segment_idxs, segmented_encodes
+        results.append(segmented_encodes)
+
+    if len(results) == 1:
+        return results[0]
     else:
-        return segmented_seqs, segment_idxs
+        return tuple(results)
 
 def stitch_chars(segmented_seqs):
     """
