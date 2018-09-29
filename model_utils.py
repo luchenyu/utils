@@ -1781,6 +1781,53 @@ def dynamic_route5(values,
                                 [cap_feat, tf.ones([tf.shape(cap_feat)[0]], dtype=tf.bool)])
     return cap_feat
 
+class CudnnLSTMCell(object):
+    """Wrapper of tf.contrib.cudnn_rnn.CudnnLSM"""
+
+    def __init__(self,
+                 num_layers,
+                 num_units,
+                 direction,
+                 dropout=0.0,
+                 is_training=True):
+        self.cell = tf.contrib.cudnn_rnn.CudnnLSTM(
+            num_layers=num_layers,
+            num_units=num_units,
+            direction=direction,
+            dropout=dropout)
+        self.num_layers = num_layers
+        self.num_dirs = 1 if direction=="unidirectional" else 2
+        self.num_units = num_units
+        self.trainable = is_training != False
+
+    def __call__(self,
+                 inputs,
+                 state,
+                 reuse=None,
+                 scope=None):
+        with tf.variable_scope(scope or "LSTM_Cell", reuse=reuse) as sc:
+            
+            state = tuple(
+                tf.transpose(
+                    tf.reshape(
+                        s, [batch_size, self.num_layers*self.num_dirs, self.num_units]), [1,0,2]) 
+                for s in state)
+            to_squeeze = False
+            if inputs.shape.ndims == 2:
+                to_squeeze = True
+                inputs = tf.expand_dims(inputs, axis=1)
+            inputs = tf.transpose(inputs, [1,0,2])
+            outputs, state = self.cell(inputs, state, training=self.trainable)
+            state = tuple(
+                tf.reshape(
+                    tf.transpose(
+                        s, [1,0,2]), [batch_size, self.num_layers*self.num_dirs*self.num_units])
+                for s in state)
+            outputs = tf.transpose(outputs, [1,0,2])
+            if to_squeeze:
+                outputs = tf.squeeze(outputs, axis=[1])
+        return outputs, state
+
 class AttentionCell(object):
     """Attention is All you need!"""
 
@@ -1789,10 +1836,10 @@ class AttentionCell(object):
                  num_layer=3,
                  dropout=None,
                  is_training=True):
-        self.size=size
-        self.num_layer=num_layer
-        self.dropout=dropout
-        self.is_training=is_training
+        self.size = size
+        self.num_layer = num_layer
+        self.dropout = dropout
+        self.is_training = is_training
 
     def __call__(self,
                  inputs,
