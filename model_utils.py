@@ -303,7 +303,8 @@ def params_decay(decay):
 def optimize_loss(loss,
                   global_step,
                   optimizer,
-                  var_list=None):
+                  var_list=None,
+                  scope=None):
     """ Optimize the model using the loss.
 
     """
@@ -311,11 +312,14 @@ def optimize_loss(loss,
     grad_var_list = optimizer.compute_gradients(loss, var_list)
     learning_rate = optimizer._lr
 
-    candidates = tf.get_collection(
-        tf.GraphKeys.WEIGHTS) + tf.get_collection(tf.GraphKeys.BIASES)
+    candidates = tf.get_collection(tf.GraphKeys.WEIGHTS, scope=scope) + \
+                 tf.get_collection(tf.GraphKeys.BIASES, scope=scope)
 
-    update_ops = set(tf.get_collection(tf.GraphKeys.UPDATE_OPS))
-    update_ops = list(update_ops)
+    update_ops_ref = tf.get_collection_ref(tf.GraphKeys.UPDATE_OPS)
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=scope)
+    for op in update_ops:
+        update_ops_ref.remove(op)
+    update_ops = list(set(update_ops))
     for grad_var in grad_var_list:
         grad, var = grad_var
         if (grad == None) or (not var in candidates):
