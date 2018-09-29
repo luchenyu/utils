@@ -1806,7 +1806,8 @@ class CudnnLSTMCell(object):
                  reuse=None,
                  scope=None):
         with tf.variable_scope(scope or "LSTM_Cell", reuse=reuse) as sc:
-            
+
+            batch_size = tf.shape(inputs)[0]            
             state = tuple(
                 tf.transpose(
                     tf.reshape(
