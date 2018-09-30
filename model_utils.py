@@ -1197,7 +1197,7 @@ def translate_position_embeds(position_embeds, delta):
 
 def transformer(inputs,
                 num_layers,
-                masks,
+                masks=None,
                 dropout=None,
                 is_training=True,
                 reuse=None,
@@ -1212,9 +1212,11 @@ def transformer(inputs,
         batch_size = tf.shape(inputs)[0]
         length = tf.shape(inputs)[1]
         size = inputs.get_shape()[-1].value
-        masks = tf.logical_and(
-            tf.sequence_mask(tf.tile(tf.expand_dims(tf.range(length)+1, 0), [batch_size, 1])),
-            masks)
+        attn_masks = tf.sequence_mask(
+            tf.tile(tf.expand_dims(tf.range(length), 0), [batch_size, 1]),
+            maxlen=length)
+        if masks != None:
+            attn_masks = tf.logical_and(attn_masks, tf.expand_dims(masks, 2))
         position_idx = tf.tile(tf.expand_dims(tf.range(length), 0), [batch_size, 1])
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
@@ -1857,7 +1859,9 @@ class AttentionCell(object):
             decoder_inputs = state[0]
             encodes = state[1::2]
             masks = state[2::2]
+            to_squeeze = False
             if inputs.shape.ndims == 2:
+                to_squeeze = True
                 idx = decoder_inputs.size()
                 decoder_inputs_tensor = tf.cond(
                     tf.greater(idx, 0),
@@ -1865,10 +1869,7 @@ class AttentionCell(object):
                         tf.expand_dims(inputs, 1)], axis=1),
                     lambda: tf.expand_dims(inputs, 1))
                 state = tuple([decoder_inputs.write(idx, decoder_inputs_tensor)] + list(state[1:]))
-                step = tf.shape(decoder_inputs_tensor)[1]
-                position_idxs = tf.tile(tf.expand_dims(step, 0), [batch_size])
-                inputs = tf.zeros([batch_size, self.size])
-                dec_masks = None
+                length = 1
             else:
                 idx = decoder_inputs.size()
                 decoder_inputs_tensor = tf.cond(
@@ -1879,22 +1880,25 @@ class AttentionCell(object):
                 decoder_inputs_tensor = tf.reshape(decoder_inputs_tensor, [batch_size, -1, input_size])
                 state = tuple([decoder_inputs.write(idx, decoder_inputs_tensor)] + list(state[1:]))
                 length = tf.shape(inputs)[1]
-                inputs = tf.zeros([batch_size, length, self.size])
-                start_idx = tf.shape(decoder_inputs_tensor)[1] - length + 1
-                end_idx = tf.shape(decoder_inputs_tensor)[1] + 1
-                position_idxs = tf.tile(tf.expand_dims(tf.range(start_idx, end_idx), 0), [batch_size, 1])
-                dec_masks = tf.sequence_mask(position_idxs)
-                masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,length,1]) if m.shape.ndims == 2 else m, masks)
+            start_idx = tf.shape(decoder_inputs_tensor)[1] - length
+            end_idx = tf.shape(decoder_inputs_tensor)[1]
+            position_idxs = tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1])
+            dec_masks = tf.sequence_mask(position_idxs, maxlen=end_idx)
+            masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,length,1]) if m.shape.ndims == 2 else m, masks)
+            inputs = fully_connected(
+                decoder_inputs_tensor,
+                self.size,
+                is_training=self.is_training,
+                scope="input_proj")
             for i in range(self.num_layer):
                 with tf.variable_scope("layer_{:d}".format(i)):
                     inputs += attention_with_position(
                         inputs,
-                        decoder_inputs_tensor,
-                        decoder_inputs_tensor,
+                        inputs,
+                        inputs,
                         size=self.size,
                         num_head=4,
                         masks=dec_masks,
-                        query_position_idxs=position_idxs,
                         dropout=self.dropout,
                         is_training=self.is_training)
                     outputs = inputs
@@ -1906,7 +1910,6 @@ class AttentionCell(object):
                             size=self.size,
                             num_head=4,
                             masks=masks[i],
-                            query_position_idxs=position_idxs,
                             dropout=self.dropout,
                             is_training=self.is_training)
                     inputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
@@ -1918,7 +1921,9 @@ class AttentionCell(object):
                         dropout=self.dropout,
                         is_training=self.is_training)
                     inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-            outputs = inputs
+            outputs = inputs[:,start_idx:]
+            if to_squeeze:
+                outputs = tf.squeeze(outputs, axis=[1])
         return outputs, state
 
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
