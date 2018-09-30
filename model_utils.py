@@ -1884,7 +1884,7 @@ class AttentionCell(object):
             end_idx = tf.shape(decoder_inputs_tensor)[1]
             position_idxs = tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1])
             dec_masks = tf.sequence_mask(position_idxs, maxlen=end_idx)
-            masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,length,1]) if m.shape.ndims == 2 else m, masks)
+            masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,end_idx,1]) if m.shape.ndims == 2 else m, masks)
             inputs = fully_connected(
                 decoder_inputs_tensor,
                 self.size,
