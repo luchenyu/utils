@@ -1222,7 +1222,7 @@ def transformer(inputs,
             with tf.variable_scope("layer"+str(i)):
                 pinputs = inputs + embed_position(position_idx, size)
                 inputs += attention_simple(pinputs, pinputs, inputs,
-                    num_head=8, size=size, masks=masks, dropout=dropout, is_training=is_training)
+                    num_head=8, size=size, masks=attn_masks, dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
                     inputs,
