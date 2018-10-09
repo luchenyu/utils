@@ -1197,6 +1197,7 @@ def translate_position_embeds(position_embeds, delta):
 
 def transformer(inputs,
                 num_layers,
+                encodes=None,
                 masks=None,
                 dropout=None,
                 is_training=True,
@@ -1212,59 +1213,16 @@ def transformer(inputs,
         batch_size = tf.shape(inputs)[0]
         length = tf.shape(inputs)[1]
         size = inputs.get_shape()[-1].value
-        attn_masks = tf.sequence_mask(
-            tf.tile(tf.expand_dims(tf.range(length), 0), [batch_size, 1]),
-            maxlen=length)
-        if masks != None:
-            attn_masks = tf.logical_and(attn_masks, tf.expand_dims(masks, 2))
-        position_idx = tf.tile(tf.expand_dims(tf.range(length), 0), [batch_size, 1])
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                pinputs = inputs + embed_position(position_idx, size)
-                inputs += attention_simple(pinputs, pinputs, inputs,
-                    num_head=8, size=size, masks=attn_masks, dropout=dropout, is_training=is_training)
-                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-                inputs += MLP(
-                    inputs,
-                    2,
-                    2*size,
-                    size,
-                    dropout=dropout,
-                    is_training=is_training)
-                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-        outputs = inputs
-    return outputs
-
-def transformer2(inputs,
-                 encodes,
-                 num_layers,
-                 masks,
-                 dropout=None,
-                 is_training=True,
-                 reuse=None,
-                 scope=None):
-    """Transformer decoder
-    """
-
-    with tf.variable_scope(scope,
-                           "Transformer",
-                           [inputs],
-                           reuse=reuse) as sc:
-        batch_size = tf.shape(inputs)[0]
-        length = tf.shape(inputs)[1]
-        size = inputs.get_shape()[-1].value
-        masks = tf.logical_and(
-            tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)),
-            masks)
-        for i in range(num_layers):
-            with tf.variable_scope("layer"+str(i)):
-                inputs += attention_with_position(inputs, encodes, encodes,
+                attn_encodes = inputs if encodes == None else encodes
+                inputs += attention_with_position(inputs, attn_encodes, attn_encodes,
                     num_head=4, size=size, masks=masks, dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
                     inputs,
                     2,
-                    size,
+                    2*size,
                     size,
                     dropout=dropout,
                     is_training=is_training)
@@ -1882,47 +1840,39 @@ class AttentionCell(object):
                 length = tf.shape(inputs)[1]
             start_idx = tf.shape(decoder_inputs_tensor)[1] - length
             end_idx = tf.shape(decoder_inputs_tensor)[1]
-            position_idxs = tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1])
+            position_idxs = tf.tile(tf.expand_dims(tf.range(start_idx, end_idx+1), 0), [batch_size, 1])
             dec_masks = tf.sequence_mask(position_idxs, maxlen=end_idx)
-            masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,end_idx,1]) if m.shape.ndims == 2 else m, masks)
-            masks = map(lambda m: tf.pad(m, [[0,0],[start_idx,0],[0,0]]), masks)
-            inputs = fully_connected(
+            masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,length,1]) if m.shape.ndims == 2 else m, masks)
+
+            inputs = MLP(
                 decoder_inputs_tensor,
+                2,
+                self.size,
                 self.size,
                 is_training=self.is_training,
-                scope="input_proj")
-            for i in range(self.num_layer):
-                with tf.variable_scope("layer_{:d}".format(i)):
-                    inputs += attention_with_position(
-                        inputs,
-                        inputs,
-                        inputs,
-                        size=self.size,
-                        num_head=4,
-                        masks=dec_masks,
-                        dropout=self.dropout,
-                        is_training=self.is_training)
-                    outputs = inputs
-                    for i in range(len(encodes)):
-                        outputs += attention_with_position(
-                            inputs,
-                            encodes[i],
-                            encodes[i],
-                            size=self.size,
-                            num_head=4,
-                            masks=masks[i],
-                            dropout=self.dropout,
-                            is_training=self.is_training)
-                    inputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
-                    inputs += MLP(
-                        inputs,
-                        2,
-                        2*self.size,
-                        self.size,
-                        dropout=self.dropout,
-                        is_training=self.is_training)
-                    inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-            outputs = inputs[:,start_idx:]
+                scope="input_projs")
+            inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+            self_masks = tf.sequence_mask(
+                tf.tile(tf.expand_dims(tf.range(end_idx)+1, 0), [batch_size, 1]),
+                maxlen=end_idx)
+            outputs = transformer(
+                inputs,
+                self.num_layer,
+                masks=self_masks,
+                dropout=self.dropout,
+                is_training=self.is_training,
+                scope="self_attn")
+            outputs = outputs[:,start_idx:end_idx]
+            inputs = outputs
+            for i in range(len(encodes)):
+                outputs += transformer(
+                    inputs,
+                    1,
+                    encodes=encodes[i],
+                    masks=masks[i],
+                    dropout=self.dropout,
+                    is_training=self.is_training,
+                    scope="attn_"+str(i))
             if to_squeeze:
                 outputs = tf.squeeze(outputs, axis=[1])
         return outputs, state
