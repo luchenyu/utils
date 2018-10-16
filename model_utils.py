@@ -1199,6 +1199,7 @@ def transformer(inputs,
                 num_layers,
                 encodes=None,
                 masks=None,
+                use_position=True,
                 dropout=None,
                 is_training=True,
                 reuse=None,
@@ -1217,7 +1218,8 @@ def transformer(inputs,
             with tf.variable_scope("layer"+str(i)):
                 attn_encodes = inputs if encodes == None else encodes
                 inputs += attention_with_position(inputs, attn_encodes, attn_encodes,
-                    num_head=4, size=size, masks=masks, dropout=dropout, is_training=is_training)
+                    num_head=4, size=size, masks=masks, use_position=use_position,
+                    dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
                     inputs,
