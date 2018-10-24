@@ -1053,7 +1053,7 @@ def attention_with_position(querys,
                             dropout=None,
                             is_training=True,
                             reuse=None,
-                            scope=None,):
+                            scope=None):
     """ implements the attention mechanism
 
     querys: [batch_size x num_querys x dim]
@@ -1092,14 +1092,22 @@ def attention_with_position(querys,
                 query_position_idxs = tf.tile(tf.expand_dims(tf.range(query_len), 0), [batch_size, 1])
             query_position_embeds = embed_position(query_position_idxs, size)
             query_position_embeds = tf.expand_dims(query_position_embeds, 1)
-            query_position_deltas = tf.get_variable(
-                'query_posit_deltas',
-                shape=[num_head, size],
-                dtype=tf.float32,
-                initializer=tf.zeros_initializer(),
-                trainable=(is_training != False))
-            query_position_deltas = tf.reshape(query_position_deltas, [1,num_head,1,size])
-            query_position_embeds = translate_position_embeds(query_position_embeds, query_position_deltas)
+            query_position_deltas = fully_connected(
+                querys,
+                num_head*size,
+                dropout=dropout,
+                is_training=is_training,
+                scope="query_position_delta_projs")
+            query_position_deltas = tf.stack(tf.split(query_position_deltas, num_head, axis=-1), axis=1)
+           # query_position_deltas = tf.get_variable(
+           #     'query_posit_deltas',
+           #     shape=[num_head, size],
+           #     dtype=tf.float32,
+           #     initializer=tf.zeros_initializer(),
+           #     trainable=(is_training != False))
+           # query_position_deltas = tf.reshape(query_position_deltas, [1,num_head,1,size])
+            query_position_translated_embeds = translate_position_embeds(
+                query_position_embeds, query_position_deltas)
 
         key_content_embeds = fully_connected(
             keys,
@@ -1124,7 +1132,7 @@ def attention_with_position(querys,
 
         logits = tf.matmul(query_content_embeds, key_content_embeds, transpose_b=True)
         if use_position:
-            logits += tf.matmul(query_position_embeds, key_position_embeds, transpose_b=True)
+            logits += tf.matmul(query_position_translated_embeds, key_position_embeds, transpose_b=True)
         logits /= tf.sqrt(float(size))
         if masks != None:
             weights = tf.expand_dims(tf.to_float(masks), axis=1)
@@ -1138,6 +1146,14 @@ def attention_with_position(querys,
         probs = tf.nn.softmax(logits) * weights
         probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
         attn_feats = tf.matmul(probs, values)
+        if use_position:
+            attn_posits = tf.matmul(probs, key_position_embeds)
+            attn_posits = translate_position_embeds(attn_posits, query_position_embeds)
+            attn_feats += fully_connected(
+                attn_posits,
+                size/num_head,
+                is_training=is_training,
+                scope="posit_projs")
        # attn_posits = tf.matmul(probs, values_position)
        # cos, sin = tf.split(query_posits, 2, axis=-1)
        # query_posits = tf.concat([cos, -sin], axis=-1)
@@ -1196,8 +1212,10 @@ def translate_position_embeds(position_embeds, delta):
     return new_position_embeds
 
 def transformer(inputs,
+                encodes,
                 num_layers,
-                encodes=None,
+                num_head=8,
+                size=None,
                 masks=None,
                 use_position=True,
                 dropout=None,
@@ -1213,24 +1231,68 @@ def transformer(inputs,
                            reuse=reuse) as sc:
         batch_size = tf.shape(inputs)[0]
         length = tf.shape(inputs)[1]
-        size = inputs.get_shape()[-1].value
+        input_size = inputs.get_shape()[-1].value
+        if size == None:
+            output_size = input_size
+        else:
+            output_size = size
+        outputs = tf.zeros([batch_size, length, output_size])
+        feats = tf.concat([inputs, outputs], axis=-1)
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                attn_encodes = inputs if encodes == None else encodes
-                inputs += attention_with_position(inputs, attn_encodes, attn_encodes,
-                    num_head=4, size=size, masks=masks, use_position=use_position,
+                outputs += attention_with_position(inputs, encodes, encodes,
+                    num_head=num_head, size=output_size, masks=masks, use_position=use_position,
+                    dropout=dropout, is_training=is_training)
+                outputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
+                feats = tf.concat([inputs, outputs], axis=-1)
+                feats += MLP(
+                    feats,
+                    2,
+                    2*(input_size+output_size),
+                    (input_size+output_size),
+                    dropout=dropout,
+                    is_training=is_training)
+                feats = tf.contrib.layers.layer_norm(feats, begin_norm_axis=-1)
+                inputs, outputs = tf.split(feats, [input_size, output_size], axis=-1)
+    return outputs
+
+def transformer_encoder(inputs,
+                        num_layers,
+                        num_head=8,
+                        masks=None,
+                        use_position=True,
+                        dropout=None,
+                        is_training=True,
+                        reuse=None,
+                        scope=None):
+    """Transformer decoder
+    """
+
+    with tf.variable_scope(scope,
+                           "Transformer",
+                           [inputs],
+                           reuse=reuse) as sc:
+        batch_size = tf.shape(inputs)[0]
+        length = tf.shape(inputs)[1]
+        input_size = inputs.get_shape()[-1].value
+        masks = tf.tile(tf.expand_dims(masks, axis=1), [1, length, 1])
+        masks = tf.logical_and(masks,
+            tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)))
+        for i in range(num_layers):
+            with tf.variable_scope("layer"+str(i)):
+                inputs += attention_with_position(inputs, inputs, inputs,
+                    num_head=num_head, size=input_size, masks=masks, use_position=use_position,
                     dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
                     inputs,
                     2,
-                    2*size,
-                    size,
+                    2*input_size,
+                    input_size,
                     dropout=dropout,
                     is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-    outputs = inputs
-    return outputs
+    return inputs
 
 def read(query,
          keys,
