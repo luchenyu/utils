@@ -107,7 +107,7 @@ class Vocab(object):
             text = text.strip()
             text = map(lambda i: i.encode('utf-8'), list(text.decode('utf-8')))
         seq = [self.key2idx(key) for key in text]
-        seq = [idx if idx else self.key2idx("_UNK") for idx in seq]
+        seq = [idx if idx!=None else self.key2idx("_UNK") for idx in seq]
         return seq
 
     def token_ids_to_sentence(self, token_ids):
