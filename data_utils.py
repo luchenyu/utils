@@ -2,6 +2,7 @@
 import gensim, os, re, sys
 import numpy as np
 import unicodedata
+import nltk
 import jieba
 import jieba.posseg as pseg
 import thulac
@@ -211,39 +212,42 @@ class Cutter(object):
     """
     one cutter to include them all!
     """
-    def __init__(self):
+    def __init__(self, _cutter):
 
-        jieba.enable_parallel(48)
+        self._cutter = _cutter
+        if _cutter == 'jieba':
+            jieba.enable_parallel(48)
 
-        self.jieba_pos_map = Dict(os.path.join(__location__, 'jieba_pos_map'))
+        elif _cutter == 'thulac':
+            self.thulac = thulac.thulac()
+            self.thulac_pos_map = Dict(os.path.join(__location__, 'thulac_pos_map'))
 
-        self.thulac = thulac.thulac()
-        self.thulac_pos_map = Dict(os.path.join(__location__, 'thulac_pos_map'))
+        elif _cutter == 'ltp':
+            ltp_path = os.path.join(__location__, "ltp_data_v3.4.0")
+            self.ltp_seg = Segmentor()
+            self.ltp_seg.load(os.path.join(ltp_path, "cws.model"))
+            self.ltp_pos = Postagger()
+            self.ltp_pos.load(os.path.join(ltp_path, "pos.model"))
+            self.ltp_pos_map = Dict(os.path.join(__location__, 'ltp_pos_map'))
 
-        ltp_path = os.path.join(__location__, "ltp_data_v3.4.0")
-        self.ltp_seg = Segmentor()
-        self.ltp_seg.load(os.path.join(ltp_path, "cws.model"))
-        self.ltp_pos = Postagger()
-        self.ltp_pos.load(os.path.join(ltp_path, "pos.model"))
-        self.ltp_pos_map = Dict(os.path.join(__location__, 'ltp_pos_map'))
-
-    def cut_words(self, text, cutter='jieba'):
+    def cut_words(self, text):
         """
         cut the words
 
         cutter: jieba|thulac
         """
-        if cutter == 'jieba':
-            s = list(pseg.cut(text))
-            s = map(lambda i: (i.word.encode('utf-8'), self.jieba_pos_map.lookup(i.flag.encode('utf-8'))), s)
-        elif cutter == 'thulac':
+        if self._cutter == 'jieba':
+            s = list(jieba.cut(text))
+        elif self._cutter == 'thulac':
             s = self.thulac.cut(text)
             s = map(lambda i: (i[0], self.thulac_pos_map.lookup(i[1])), s)
-        elif cutter == 'ltp':
+        elif self._cutter == 'ltp':
             s1 = self.ltp_seg.segment(text)
             s2 = self.ltp_pos.postag(s1)
             s2 = map(lambda i: self.ltp_pos_map.lookup(i), s2)
             s = zip(s1, s2)
+        elif self._cutter == 'nltk':
+            s = nltk.tokenize.word_tokenize(text)
         return s
 
 class Synonyms(object):
@@ -287,6 +291,23 @@ def normalize(text):
     text = unicodedata.normalize('NFKC', text.decode('utf-8')).encode('utf-8')
     text = zht2zhs(text)
     return text
+
+def words_to_token_ids(words, vocab):
+    """
+    Turn outputs of posseg into two seq of ids
+    """
+
+    seqs = []
+    segs = []
+    for word in words:
+        word_ids = vocab.sentence_to_token_ids(word)
+        if len(word_ids) == 0:
+            continue
+        seqs.extend(word_ids)
+        segs.extend([1.0]+[0.0]*(len(word_ids)-1))
+    if len(segs) > 0:
+        segs.append(1.0)
+    return seqs, segs
 
 def posseg_to_token_ids(pos_segs, vocab, posseg_vocab):
     """
