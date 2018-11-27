@@ -1029,12 +1029,20 @@ def attention_simple(querys,
             scope="value_projs")
         values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
         
-
         logits = tf.matmul(querys, keys, transpose_b=True)
         logits /= tf.sqrt(tf.to_float(size))
 
-        probs = tf.exp(logits) * tf.expand_dims(tf.to_float(masks), axis=1)
+        if masks != None:
+            weights = tf.expand_dims(tf.to_float(masks), axis=1)
+        else:
+            weights = tf.ones(tf.shape(logits))
+        logits *= weights
+        logits = tf.pad(logits, [[0,0], [0,0], [0,0], [1,0]])
+        weights = tf.pad(weights, [[0,0], [0,0], [0,0], [1,0]], constant_values=1.0)
+
+        probs = tf.exp(logits) * weights
         probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
+        probs = probs[:,:,:,1:]
         attn_feats = tf.matmul(probs, values)
         attn_feats = tf.concat(tf.unstack(attn_feats, axis=1), axis=-1)
         if single_query:
@@ -1138,13 +1146,13 @@ def attention_with_position(querys,
             weights = tf.expand_dims(tf.to_float(masks), axis=1)
         else:
             weights = tf.ones(tf.shape(logits))
-        logits -= tf.stop_gradient(
-            tf.reduce_sum(logits*weights, axis=-1, keepdims=True) / \
-            (tf.reduce_sum(weights, axis=-1, keepdims=True)+1e-20))
         logits = logits * weights
+        logits = tf.pad(logits, [[0,0], [0,0], [0,0], [1,0]])
+        weights = tf.pad(weights, [[0,0], [0,0], [0,0], [1,0]], constant_values=1.0)
 
         probs = tf.nn.softmax(logits) * weights
         probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
+        probs = probs[:,:,:,1:]
         attn_feats = tf.matmul(probs, values)
         if use_position:
             attn_posits = tf.matmul(probs, key_position_embeds)
@@ -1154,20 +1162,142 @@ def attention_with_position(querys,
                 size/num_head,
                 is_training=is_training,
                 scope="posit_projs")
-       # attn_posits = tf.matmul(probs, values_position)
-       # cos, sin = tf.split(query_posits, 2, axis=-1)
-       # query_posits = tf.concat([cos, -sin], axis=-1)
-       # query_posits = tf.tile(tf.expand_dims(query_posits, 1), [1,num_head,1,1])
-       # attn_posits = translate_position_embeds(attn_posits, query_posits)
-       # attn_feats += fully_connected(
-       #     attn_posits,
-       #     size/num_head,
-       #     is_training=is_training,
-       #     scope="attn_posit_projs")
         attn_feats = tf.concat(tf.unstack(attn_feats, axis=1), axis=-1)
         if single_query:
             attn_feats = tf.squeeze(attn_feats, 1)
     return attn_feats
+
+def attention_write(querys,
+                    values,
+                    size=None,
+                    num_head=1,
+                    masks=None,
+                    query_position_idxs=None,
+                    key_position_idxs=None,
+                    use_position=True,
+                    use_write=True,
+                    dropout=None,
+                    is_training=True,
+                    reuse=None,
+                    scope=None):
+    """ implements the attention mechanism
+
+    querys: [batch_size x num_querys x dim]
+    values: [batch_size x length x dim]
+    masks: [batch_size x num_querys x length]
+    """
+
+    with tf.variable_scope(scope,
+                           "attention",
+                           [querys, values],
+                           reuse=reuse) as sc:
+        single_query = False
+        if len(querys.get_shape()) == 2:
+            single_query = True
+            querys = tf.expand_dims(querys, 1)
+            masks = tf.expand_dims(masks, 1) if masks != None else None
+            if query_position_idxs != None:
+                query_position_idxs = tf.expand_dims(query_position_idxs, 1)
+        value_size = values.get_shape()[-1].value
+        if size == None:
+            size = value_size
+
+        batch_size = tf.shape(querys)[0]
+        query_len = tf.shape(querys)[1]
+        key_len = tf.shape(values)[1]
+
+        query_content_embeds = fully_connected(
+            querys,
+            size,
+            dropout=dropout,
+            is_training=is_training,
+            scope="query_content_projs")
+        query_content_embeds = tf.stack(tf.split(query_content_embeds, num_head, axis=-1), axis=1)
+        if use_position:
+            if query_position_idxs == None:
+                query_position_idxs = tf.tile(tf.expand_dims(tf.range(query_len), 0), [batch_size, 1])
+            query_position_embeds = embed_position(query_position_idxs, size)
+            query_position_embeds = tf.expand_dims(query_position_embeds, 1)
+            query_position_deltas = fully_connected(
+                querys,
+                num_head*size,
+                dropout=dropout,
+                is_training=is_training,
+                scope="query_position_delta_projs")
+            query_position_deltas = tf.stack(tf.split(query_position_deltas, num_head, axis=-1), axis=1)
+           # query_position_deltas = tf.get_variable(
+           #     'query_posit_deltas',
+           #     shape=[num_head, size],
+           #     dtype=tf.float32,
+           #     initializer=tf.zeros_initializer(),
+           #     trainable=(is_training != False))
+           # query_position_deltas = tf.reshape(query_position_deltas, [1,num_head,1,size])
+            query_position_translated_embeds = translate_position_embeds(
+                query_position_embeds, query_position_deltas)
+
+        key_content_embeds = fully_connected(
+            values,
+            size,
+            dropout=dropout,
+            is_training=is_training,
+            scope="key_content_projs")
+        key_content_embeds = tf.stack(tf.split(key_content_embeds, num_head, axis=-1), axis=1)
+        if use_position:
+            if key_position_idxs == None:
+                key_position_idxs = tf.tile(tf.expand_dims(tf.range(key_len), 0), [batch_size, 1])
+            key_position_embeds = embed_position(key_position_idxs, size)
+            key_position_embeds = tf.tile(tf.expand_dims(key_position_embeds, 1), [1,num_head,1,1])
+
+        value_projs = fully_connected(
+            values,
+            size,
+            dropout=dropout,
+            is_training=is_training,
+            scope="value_projs")
+        value_projs = tf.stack(tf.split(value_projs, num_head, axis=-1), axis=1)
+
+        logits = tf.matmul(query_content_embeds, key_content_embeds, transpose_b=True)
+        if use_position:
+            logits += tf.matmul(query_position_translated_embeds, key_position_embeds, transpose_b=True)
+        logits /= tf.sqrt(float(size))
+        if masks != None:
+            weights = tf.expand_dims(tf.to_float(masks), axis=1)
+        else:
+            weights = tf.ones(tf.shape(logits))
+        logits = logits * weights
+        logits = tf.pad(logits, [[0,0], [0,0], [0,0], [1,0]])
+        weights = tf.pad(weights, [[0,0], [0,0], [0,0], [1,0]], constant_values=1.0)
+
+        probs = tf.nn.softmax(logits) * weights
+        probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
+        probs = probs[:,:,:,1:]
+        attn_feats = tf.matmul(probs, value_projs)
+        if use_position:
+            attn_posits = tf.matmul(probs, key_position_embeds)
+            attn_posits = translate_position_embeds(attn_posits, query_position_embeds)
+            attn_feats += fully_connected(
+                attn_posits,
+                size/num_head,
+                is_training=is_training,
+                scope="posit_projs")
+        attn_feats = tf.concat(tf.unstack(attn_feats, axis=1), axis=-1)
+        if single_query:
+            attn_feats = tf.squeeze(attn_feats, 1)
+
+        if use_write:
+            query_projs = fully_connected(
+                querys,
+                num_head*value_size,
+                dropout=dropout,
+                is_training=is_training,
+                scope="query_write_projs")
+            query_projs = tf.stack(tf.split(query_projs, num_head, axis=-1), axis=1)
+            query_projs = tf.matmul(probs, query_projs, transpose_a=True)
+            query_projs = tf.reduce_sum(query_projs, axis=1)
+            values += query_projs
+            values = tf.contrib.layers.layer_norm(values, begin_norm_axis=-1)
+
+    return attn_feats, values
 
 def embed_position(position_idx,
                    size):
@@ -1212,12 +1342,9 @@ def translate_position_embeds(position_embeds, delta):
     return new_position_embeds
 
 def transformer(inputs,
-                encodes,
                 num_layers,
                 num_head=8,
-                size=None,
                 masks=None,
-                use_position=True,
                 dropout=None,
                 is_training=True,
                 reuse=None,
@@ -1232,56 +1359,16 @@ def transformer(inputs,
         batch_size = tf.shape(inputs)[0]
         length = tf.shape(inputs)[1]
         input_size = inputs.get_shape()[-1].value
-        if size == None:
-            output_size = input_size
+        if masks != None:
+            masks = tf.tile(tf.expand_dims(masks, 1), [1,length,1])
         else:
-            output_size = size
-        outputs = tf.zeros([batch_size, length, output_size])
-        feats = tf.concat([inputs, outputs], axis=-1)
-        for i in range(num_layers):
-            with tf.variable_scope("layer"+str(i)):
-                outputs += attention_with_position(inputs, encodes, encodes,
-                    num_head=num_head, size=output_size, masks=masks, use_position=use_position,
-                    dropout=dropout, is_training=is_training)
-                outputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
-                feats = tf.concat([inputs, outputs], axis=-1)
-                feats += MLP(
-                    feats,
-                    2,
-                    2*(input_size+output_size),
-                    (input_size+output_size),
-                    dropout=dropout,
-                    is_training=is_training)
-                feats = tf.contrib.layers.layer_norm(feats, begin_norm_axis=-1)
-                inputs, outputs = tf.split(feats, [input_size, output_size], axis=-1)
-    return outputs
-
-def transformer_encoder(inputs,
-                        num_layers,
-                        num_head=8,
-                        masks=None,
-                        use_position=True,
-                        dropout=None,
-                        is_training=True,
-                        reuse=None,
-                        scope=None):
-    """Transformer decoder
-    """
-
-    with tf.variable_scope(scope,
-                           "Transformer",
-                           [inputs],
-                           reuse=reuse) as sc:
-        batch_size = tf.shape(inputs)[0]
-        length = tf.shape(inputs)[1]
-        input_size = inputs.get_shape()[-1].value
-        masks = tf.tile(tf.expand_dims(masks, axis=1), [1, length, 1])
+            masks = tf.ones([batch_size, length, length], dtype=tf.bool)
         masks = tf.logical_and(masks,
             tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)))
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                inputs += attention_with_position(inputs, inputs, inputs,
-                    num_head=num_head, size=input_size, masks=masks, use_position=use_position,
+                inputs += attention_simple(inputs, inputs, inputs,
+                    num_head=num_head, masks=masks, size=input_size,
                     dropout=dropout, is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
                 inputs += MLP(
@@ -1293,6 +1380,49 @@ def transformer_encoder(inputs,
                     is_training=is_training)
                 inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
     return inputs
+
+def transformer2(inputs,
+                 num_layers,
+                 num_head=8,
+                 masks=None,
+                 dropout=None,
+                 is_training=True,
+                 reuse=None,
+                 scope=None):
+    """Transformer decoder
+    """
+
+    with tf.variable_scope(scope,
+                           "Transformer",
+                           [inputs],
+                           reuse=reuse) as sc:
+        batch_size = tf.shape(inputs)[0]
+        length = tf.shape(inputs)[1]
+        input_size = inputs.get_shape()[-1].value
+        if masks != None:
+            masks = tf.tile(tf.expand_dims(masks, 1), [1,length,1])
+        else:
+            masks = tf.ones([batch_size, length, length], dtype=tf.bool)
+        masks = tf.logical_and(masks,
+            tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)))
+        outputs = tf.zeros(tf.shape(inputs))
+        for i in range(num_layers):
+            with tf.variable_scope("layer"+str(i)):
+                concat_feats = tf.concat([inputs, outputs], axis=-1)
+                outputs += attention_simple(concat_feats, concat_feats, concat_feats,
+                    num_head=num_head, masks=masks, size=input_size,
+                    dropout=dropout, is_training=is_training)
+                outputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
+                concat_feats = tf.concat([inputs, outputs], axis=-1)
+                outputs += MLP(
+                    concat_feats,
+                    2,
+                    2*input_size,
+                    input_size,
+                    dropout=dropout,
+                    is_training=is_training)
+                outputs = tf.contrib.layers.layer_norm(outputs, begin_norm_axis=-1)
+    return outputs
 
 def read(query,
          keys,
