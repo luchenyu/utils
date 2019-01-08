@@ -216,7 +216,7 @@ class Cutter(object):
 
         self._cutter = _cutter
         if _cutter == 'jieba':
-            jieba.enable_parallel(48)
+            jieba.enable_parallel(64)
 
         elif _cutter == 'thulac':
             self.thulac = thulac.thulac()

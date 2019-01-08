@@ -1425,7 +1425,8 @@ def transformer2(keys,
         else:
             value_size = values.get_shape()[-1].value
         if masks != None:
-            masks = tf.tile(tf.expand_dims(masks, 1), [1,length,1])
+            if len(masks.get_shape()) != 3:
+                masks = tf.tile(tf.expand_dims(masks, 1), [1,length,1])
         else:
             masks = tf.ones([batch_size, length, length], dtype=tf.bool)
         masks = tf.logical_and(masks,
@@ -2094,8 +2095,10 @@ class AttentionCell(object):
             batch_size = tf.shape(inputs)[0]
             input_size = inputs.get_shape()[-1].value
             decoder_inputs = state[0]
-            encodes = state[1::2]
-            masks = state[2::2]
+            encodes = tf.concat(state[1::2], axis=1)
+            masks = tf.concat(state[2::2], axis=1)
+            enc_dim = encodes.get_shape()[-1].value
+            enc_length = tf.shape(encodes)[1]
             to_squeeze = False
             if inputs.shape.ndims == 2:
                 to_squeeze = True
@@ -2119,32 +2122,35 @@ class AttentionCell(object):
                 length = tf.shape(inputs)[1]
             start_idx = tf.shape(decoder_inputs_tensor)[1] - length
             end_idx = tf.shape(decoder_inputs_tensor)[1]
-            position_idxs = tf.tile(tf.expand_dims(tf.range(start_idx, end_idx+1), 0), [batch_size, 1])
-            dec_masks = tf.sequence_mask(position_idxs, maxlen=end_idx)
-            masks = map(lambda m: tf.tile(tf.expand_dims(m, 1), [1,length,1]) if m != None and m.shape.ndims == 2
-                else m, masks)
 
             inputs = MLP(
                 decoder_inputs_tensor,
                 2,
                 self.size,
-                self.size,
+                enc_dim,
                 is_training=self.is_training,
                 scope="input_projs")
             inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+            posit_embeds = embed_position(
+                tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1]),
+                self.size)
+            inputs += posit_embeds
+            inputs = tf.concat([encodes, inputs], axis=1)
             self_masks = tf.sequence_mask(
                 tf.tile(tf.expand_dims(tf.range(end_idx)+1, 0), [batch_size, 1]),
                 maxlen=end_idx)
-            outputs = transformer(
+            self_masks = tf.concat(
+                [tf.tile(tf.expand_dims(masks, 1), [1,end_idx,1]), self_masks],
+                axis=2)
+            self_masks = tf.pad(self_masks, [[0,0],[enc_length,0],[0,0]])
+            outputs = transformer2(
                 inputs,
                 self.num_layer,
-                encodes_list=encodes,
                 masks=self_masks,
-                encode_masks_list=masks,
                 dropout=self.dropout,
                 is_training=self.is_training,
                 scope="transformer")
-            outputs = outputs[:,start_idx:end_idx]
+            outputs = outputs[:,start_idx+enc_length:end_idx+enc_length]
             if to_squeeze:
                 outputs = tf.squeeze(outputs, axis=[1])
         return outputs, state
