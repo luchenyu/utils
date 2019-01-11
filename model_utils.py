@@ -2074,7 +2074,16 @@ class CudnnLSTMCell(object):
         return outputs, state
 
 class AttentionCell(object):
-    """Attention is All you need!"""
+    """
+    Attention Cell for sequence generation
+
+    inputs: batch_size x [input_length] x input_dim
+    state: tuple(decoder_inputs, encodes, masks)
+        decoder_inputs: TensorArray with last item be the history inputs with batch_size x length x input_dim
+        encodes: batch_size x enc_length x enc_dim
+        masks: batch_size x enc_length
+    """
+    
 
     def __init__(self,
                  size,
@@ -2092,11 +2101,23 @@ class AttentionCell(object):
                  reuse=None,
                  scope=None):
         with tf.variable_scope(scope or "Attn_Cell", reuse=reuse) as sc:
+            collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+            trainable=(self.is_training != False)
+            if trainable:
+                collections.append(tf.GraphKeys.WEIGHTS)
+            field_embedding = tf.get_variable(
+                "field_embedding",
+                shape=[2, self.size],
+                dtype=tf.float32,
+                initializer=tf.initializers.truncated_normal(0.0, 0.01),
+                trainable=trainable,
+                collections=collections)
+
             batch_size = tf.shape(inputs)[0]
-            input_size = inputs.get_shape()[-1].value
+            input_dim = inputs.get_shape()[-1].value
             decoder_inputs = state[0]
-            encodes = tf.concat(state[1::2], axis=1)
-            masks = tf.concat(state[2::2], axis=1)
+            encodes = state[1]
+            masks = state[2]
             enc_dim = encodes.get_shape()[-1].value
             enc_length = tf.shape(encodes)[1]
             to_squeeze = False
@@ -2105,7 +2126,7 @@ class AttentionCell(object):
                 idx = decoder_inputs.size()
                 decoder_inputs_tensor = tf.cond(
                     tf.greater(idx, 0),
-                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, input_size]),
+                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, input_dim]),
                         tf.expand_dims(inputs, 1)], axis=1),
                     lambda: tf.expand_dims(inputs, 1))
                 state = tuple([decoder_inputs.write(idx, decoder_inputs_tensor)] + list(state[1:]))
@@ -2114,10 +2135,10 @@ class AttentionCell(object):
                 idx = decoder_inputs.size()
                 decoder_inputs_tensor = tf.cond(
                     tf.greater(idx, 0),
-                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, input_size]),
+                    lambda: tf.concat([tf.reshape(decoder_inputs.read(idx-1), [batch_size, -1, input_dim]),
                         inputs], axis=1),
                     lambda: inputs)
-                decoder_inputs_tensor = tf.reshape(decoder_inputs_tensor, [batch_size, -1, input_size])
+                decoder_inputs_tensor = tf.reshape(decoder_inputs_tensor, [batch_size, -1, input_dim])
                 state = tuple([decoder_inputs.write(idx, decoder_inputs_tensor)] + list(state[1:]))
                 length = tf.shape(inputs)[1]
             start_idx = tf.shape(decoder_inputs_tensor)[1] - length
@@ -2131,26 +2152,56 @@ class AttentionCell(object):
                 is_training=self.is_training,
                 scope="input_projs")
             inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+
+            field_embeds_list = []
+            value_embeds_list = []
+            # encodes part
+            posit_embeds = embed_position(
+                tf.tile(tf.expand_dims(tf.range(enc_length), 0), [batch_size, 1]),
+                self.size)
+            field_embeds = posit_embeds + tf.nn.embedding_lookup(field_embedding, 0)
+            field_embeds_list.append(field_embeds)
+            value_embeds_list.append(encodes)
+
+            # decoder inputs part
             posit_embeds = embed_position(
                 tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1]),
                 self.size)
-            inputs += posit_embeds
-            inputs = tf.concat([encodes, inputs], axis=1)
-            self_masks = tf.sequence_mask(
-                tf.tile(tf.expand_dims(tf.range(end_idx)+1, 0), [batch_size, 1]),
-                maxlen=end_idx)
-            self_masks = tf.concat(
-                [tf.tile(tf.expand_dims(masks, 1), [1,end_idx,1]), self_masks],
-                axis=2)
-            self_masks = tf.pad(self_masks, [[0,0],[enc_length,0],[0,0]])
+            field_embeds = posit_embeds + tf.nn.embedding_lookup(field_embedding, 1)
+            field_embeds_list.append(field_embeds)
+            value_embeds_list.append(inputs)
+
+            # decoder output part
+            posit_embeds = embed_position(
+                tf.tile(tf.expand_dims(tf.range(start_idx+1, end_idx+1), 0), [batch_size, 1]),
+                self.size)
+            field_embeds = posit_embeds + tf.nn.embedding_lookup(field_embedding, 1)
+            field_embeds_list.append(field_embeds)
+            value_embeds_list.append(tf.zeros([batch_size, length, enc_dim]))
+
+            # prepare masks
+            attn_masks = tf.concat(
+                [tf.sequence_mask(
+                     tf.tile(tf.expand_dims(tf.range(enc_length, enc_length+end_idx)+1,0), [batch_size,1]),
+                     maxlen=enc_length+end_idx+length),
+                 tf.sequence_mask(
+                     tf.tile(tf.expand_dims(tf.range(enc_length+start_idx, enc_length+end_idx)+1,0), [batch_size,1]),
+                     maxlen=enc_length+end_idx+length)],
+                axis=1)
+            attn_masks = tf.logical_and(
+                attn_masks,
+                tf.expand_dims(tf.pad(masks, [[0,0],[0,end_idx+length]], constant_values=True), axis=1))
+            attn_masks = tf.pad(attn_masks, [[0,0],[enc_length, 0],[0,0]])
+
             outputs = transformer2(
-                inputs,
+                tf.concat(field_embeds_list, axis=1),
                 self.num_layer,
-                masks=self_masks,
+                values=tf.concat(value_embeds_list, axis=1),
+                masks=attn_masks,
                 dropout=self.dropout,
                 is_training=self.is_training,
                 scope="transformer")
-            outputs = outputs[:,start_idx+enc_length:end_idx+enc_length]
+            outputs = outputs[:,enc_length+end_idx:]
             if to_squeeze:
                 outputs = tf.squeeze(outputs, axis=[1])
         return outputs, state
