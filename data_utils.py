@@ -292,6 +292,22 @@ def normalize(text):
     text = zht2zhs(text)
     return text
 
+def labels_to_ids_array(labels, vocab):
+    """
+    args:
+        labels: list of labels
+        vocab: vocab of characters
+    return:
+        label_ids: num_labels x char_length
+    """
+    label_ids_list = []
+    for label in labels:
+        label_ids = vocab.sentence_to_token_ids(label)
+        label_ids_list.append(label_ids)
+    max_char_length = max(map(lambda i: len(i), label_ids_list))
+    label_ids_list = map(lambda i: i+[0]*(max_char_length-len(i)), label_ids_list)
+    return np.array(label_ids_list)
+
 def words_to_token_ids(words, vocab):
     """
     Turn outputs of posseg into two seq of ids
