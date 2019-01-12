@@ -1416,6 +1416,12 @@ def transformer2(keys,
                            "Transformer",
                            [keys, values],
                            reuse=reuse) as sc:
+
+        trainable = (is_training != False)
+        collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+        if trainable:
+            collections.append(tf.GraphKeys.WEIGHTS)
+
         batch_size = tf.shape(keys)[0]
         length = tf.shape(keys)[1]
         key_size = keys.get_shape()[-1].value
@@ -1437,7 +1443,9 @@ def transformer2(keys,
                 values += attention_simple(concat_feats, concat_feats, concat_feats,
                     num_head=num_head, masks=masks, size=value_size,
                     dropout=dropout, is_training=is_training)
-                values = tf.contrib.layers.layer_norm(values, begin_norm_axis=-1)
+                values = tf.contrib.layers.layer_norm(
+                    values, begin_norm_axis=-1,
+                    variables_collections=collections, trainable=trainable)
                 concat_feats = tf.concat([keys, values], axis=-1)
                 values += MLP(
                     concat_feats,
@@ -1446,7 +1454,9 @@ def transformer2(keys,
                     value_size,
                     dropout=dropout,
                     is_training=is_training)
-                values = tf.contrib.layers.layer_norm(values, begin_norm_axis=-1)
+                values = tf.contrib.layers.layer_norm(
+                    values, begin_norm_axis=-1,
+                    variables_collections=collections, trainable=trainable)
     return values
 
 def transformer3(keys,
@@ -2151,7 +2161,9 @@ class AttentionCell(object):
                 enc_dim,
                 is_training=self.is_training,
                 scope="input_projs")
-            inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
+            inputs = tf.contrib.layers.layer_norm(
+                inputs, begin_norm_axis=-1,
+                variables_collections=collections, trainable=trainable)
 
             field_embeds_list = []
             value_embeds_list = []
@@ -2202,6 +2214,11 @@ class AttentionCell(object):
                 is_training=self.is_training,
                 scope="transformer")
             outputs = outputs[:,enc_length+end_idx:]
+            outputs = fully_connected(
+                outputs,
+                enc_dim,
+                is_training=self.is_training,
+                scope="projs")
             if to_squeeze:
                 outputs = tf.squeeze(outputs, axis=[1])
         return outputs, state
