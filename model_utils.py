@@ -1341,28 +1341,39 @@ def translate_position_embeds(position_embeds, delta):
     new_position_embeds = tf.concat([new_cos, new_sin], axis=-1)
     return new_position_embeds
 
-def transformer(inputs,
+def transformer(keys,
                 num_layers,
-                encodes_list=None,
+                values=None,
                 num_head=8,
                 masks=None,
-                encode_masks_list=None,
                 dropout=None,
                 is_training=True,
                 reuse=None,
                 scope=None):
     """Transformer decoder
+       in the form of key-value
     """
 
     with tf.variable_scope(scope,
                            "Transformer",
-                           [inputs],
+                           [keys, values],
                            reuse=reuse) as sc:
-        batch_size = tf.shape(inputs)[0]
-        length = tf.shape(inputs)[1]
-        input_size = inputs.get_shape()[-1].value
+
+        trainable = (is_training != False)
+        collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+        if trainable:
+            collections.append(tf.GraphKeys.WEIGHTS)
+
+        batch_size = tf.shape(keys)[0]
+        length = tf.shape(keys)[1]
+        key_size = keys.get_shape()[-1].value
+        value_size = key_size
+        if values != None:
+            value_size = values.get_shape()[-1].value
+            keys += values
+        values = tf.zeros_like(keys)
         if masks != None:
-            if len(masks.get_shape()) == 2:
+            if len(masks.get_shape()) != 3:
                 masks = tf.tile(tf.expand_dims(masks, 1), [1,length,1])
         else:
             masks = tf.ones([batch_size, length, length], dtype=tf.bool)
@@ -1370,34 +1381,25 @@ def transformer(inputs,
             tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)))
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
-                inputs += attention_simple(inputs, inputs, inputs,
-                    num_head=num_head, masks=masks, size=input_size,
+                concat_feats = tf.concat([keys, values], axis=-1)
+                attn_feats= attention_simple(concat_feats, concat_feats, concat_feats,
+                    num_head=num_head, masks=masks, size=value_size,
                     dropout=dropout, is_training=is_training)
-                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-                if encodes_list != None:
-                    attn_list = []
-                    for i, encodes in enumerate(encodes_list):
-                        if encode_masks_list != None:
-                            encode_masks = encode_masks_list[i]
-                            if encode_masks != None and len(encode_masks.get_shape()) == 2:
-                                encode_masks = tf.tile(tf.expand_dims(encode_masks, 1), [1, length, 1])
-                        else:
-                            encode_masks = None
-                        attn_list.append(attention_simple(inputs, encodes, encodes,
-                            num_head=num_head, masks=encode_masks, size=input_size,
-                            dropout=dropout, is_training=is_training, scope="attn_"+str(i)))
-                    for attn in attn_list:
-                        inputs += attn
-                    inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-                inputs += MLP(
-                    inputs,
+                attn_feats = tf.contrib.layers.layer_norm(
+                    attn_feats, begin_norm_axis=-1,
+                    variables_collections=collections, trainable=trainable)
+                concat_feats = tf.concat([keys, attn_feats], axis=-1)
+                values += MLP(
+                    concat_feats,
                     2,
-                    2*input_size,
-                    input_size,
+                    2*value_size,
+                    value_size,
                     dropout=dropout,
                     is_training=is_training)
-                inputs = tf.contrib.layers.layer_norm(inputs, begin_norm_axis=-1)
-    return inputs
+                values = tf.contrib.layers.layer_norm(
+                    values, begin_norm_axis=-1,
+                    variables_collections=collections, trainable=trainable)
+    return values
 
 def transformer2(keys,
                  num_layers,
@@ -1469,56 +1471,52 @@ def transformer3(keys,
                  reuse=None,
                  scope=None):
     """Transformer decoder
-       with VAE-like random sampling and kl loss
+       in the form of key-value
     """
 
     with tf.variable_scope(scope,
                            "Transformer",
                            [keys, values],
                            reuse=reuse) as sc:
+
+        trainable = (is_training != False)
+        collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+        if trainable:
+            collections.append(tf.GraphKeys.WEIGHTS)
+
         batch_size = tf.shape(keys)[0]
         length = tf.shape(keys)[1]
         key_size = keys.get_shape()[-1].value
-        if values == None:
-            values = tf.zeros(tf.shape(keys))
-            value_size = key_size
-        else:
+        value_size = key_size
+        if values != None:
             value_size = values.get_shape()[-1].value
+            keys += values
+        values = tf.zeros_like(keys)
         if masks != None:
-            attn_masks = tf.tile(tf.expand_dims(masks, 1), [1,length,1])
+            if len(masks.get_shape()) != 3:
+                masks = tf.tile(tf.expand_dims(masks, 1), [1,length,1])
         else:
-            attn_masks = tf.ones([batch_size, length, length], dtype=tf.bool)
-        attn_masks = tf.logical_and(attn_masks,
+            masks = tf.ones([batch_size, length, length], dtype=tf.bool)
+        masks = tf.logical_and(masks,
             tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)))
-        kl_losses = tf.zeros([batch_size, length])
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
                 concat_feats = tf.concat([keys, values], axis=-1)
-                prob_feats = fully_connected(
-                    concat_feats,
-                    2*value_size,
-                    is_training=is_training)
-                mean, log_var = tf.split(prob_feats, 2, axis=-1)
-                querys = mean + tf.random_normal(tf.shape(mean))*tf.exp(0.5*log_var)
-                querys = tf.concat([keys, querys], axis=-1)
-                kl_losses += -0.5*tf.reduce_sum(log_var + 1.0 - tf.exp(log_var) - tf.square(mean), axis=-1)
-                new_values = attention_simple(querys, concat_feats, concat_feats,
-                    num_head=num_head, masks=attn_masks, size=value_size,
+                attn_feats= attention_simple(concat_feats, concat_feats, concat_feats,
+                    num_head=num_head, masks=masks, size=value_size,
                     dropout=dropout, is_training=is_training)
-                new_values = tf.contrib.layers.layer_norm(new_values, begin_norm_axis=-1)
-                concat_feats = tf.concat([keys, values, new_values], axis=-1)
-                proj_feats = MLP(
+                concat_feats = tf.concat([keys, attn_feats], axis=-1)
+                values += MLP(
                     concat_feats,
                     2,
                     2*value_size,
-                    2*value_size,
+                    value_size,
                     dropout=dropout,
                     is_training=is_training)
-                updates, gates = tf.split(proj_feats, 2, axis=-1)
-                updates = tf.contrib.layers.layer_norm(updates, begin_norm_axis=-1)
-                gates = tf.sigmoid(gates)
-                values = gates * values + (1.0-gates) * updates
-    return values, kl_losses
+                values = tf.contrib.layers.layer_norm(
+                    values, begin_norm_axis=-1,
+                    variables_collections=collections, trainable=trainable)
+    return values
 
 def read(query,
          keys,
@@ -2129,6 +2127,7 @@ class AttentionCell(object):
             encodes = state[1]
             masks = state[2]
             enc_dim = encodes.get_shape()[-1].value
+            assert(input_dim == enc_dim)
             enc_length = tf.shape(encodes)[1]
             to_squeeze = False
             if inputs.shape.ndims == 2:
@@ -2153,17 +2152,6 @@ class AttentionCell(object):
                 length = tf.shape(inputs)[1]
             start_idx = tf.shape(decoder_inputs_tensor)[1] - length
             end_idx = tf.shape(decoder_inputs_tensor)[1]
-
-            inputs = MLP(
-                decoder_inputs_tensor,
-                2,
-                self.size,
-                enc_dim,
-                is_training=self.is_training,
-                scope="input_projs")
-            inputs = tf.contrib.layers.layer_norm(
-                inputs, begin_norm_axis=-1,
-                variables_collections=collections, trainable=trainable)
 
             field_embeds_list = []
             value_embeds_list = []
@@ -2194,7 +2182,7 @@ class AttentionCell(object):
             # prepare masks
             attn_masks = tf.concat(
                 [tf.sequence_mask(
-                     tf.tile(tf.expand_dims(tf.range(enc_length, enc_length+end_idx)+1,0), [batch_size,1]),
+                     tf.tile(tf.expand_dims(tf.range(enc_length, enc_length+end_idx),0), [batch_size,1]),
                      maxlen=enc_length+end_idx+length),
                  tf.sequence_mask(
                      tf.tile(tf.expand_dims(tf.range(enc_length+start_idx, enc_length+end_idx)+1,0), [batch_size,1]),
@@ -2205,7 +2193,7 @@ class AttentionCell(object):
                 tf.expand_dims(tf.pad(masks, [[0,0],[0,end_idx+length]], constant_values=True), axis=1))
             attn_masks = tf.pad(attn_masks, [[0,0],[enc_length, 0],[0,0]])
 
-            outputs = transformer2(
+            outputs = transformer(
                 tf.concat(field_embeds_list, axis=1),
                 self.num_layer,
                 values=tf.concat(value_embeds_list, axis=1),
@@ -2217,6 +2205,7 @@ class AttentionCell(object):
             outputs = fully_connected(
                 outputs,
                 enc_dim,
+                dropout=self.dropout,
                 is_training=self.is_training,
                 scope="projs")
             if to_squeeze:
@@ -2943,7 +2932,7 @@ def slice_words(seqs, segs, get_idxs=False, encodes=None):
     padded_seqs = tf.pad(seqs, [[0,0],[1,1]])
     padded_segs = tf.pad(segs, [[0,0],[1,1]], constant_values=1.0)
     padded_segs = tf.cast(padded_segs, tf.bool)
-    padded_seq_masks = tf.greater(padded_seqs, 0)
+    padded_seq_masks = tf.not_equal(padded_seqs, 0)
     padded_seg_masks1 = tf.logical_or(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
     padded_segs = tf.logical_and(padded_segs, padded_seg_masks1)
     padded_seg_masks2 = tf.logical_xor(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
@@ -2952,19 +2941,19 @@ def slice_words(seqs, segs, get_idxs=False, encodes=None):
     num_words = tf.reduce_sum(tf.to_int32(padded_segs), axis=1)-1
     max_num_word = tf.maximum(tf.reduce_max(num_words), 1)
 
-    def get_idx(inputs):
-        padded_seg, num_word = inputs
+    def get_idx(padded_seg):
         idx = tf.range(max_length+1, dtype=tf.int32)
         idx = tf.boolean_mask(idx, padded_seg)
-        start = tf.pad(idx[:-1], [[0,max_num_word-num_word]])
+        num = tf.shape(idx)[0]-1
+        start = tf.pad(idx[:-1], [[0,max_num_word-num]])
         start = tf.reshape(start, [max_num_word])
-        length = tf.pad(idx[1:] - idx[:-1], [[0,max_num_word-num_word]])
+        length = tf.pad(idx[1:] - idx[:-1], [[0,max_num_word-num]])
         length = tf.reshape(length, [max_num_word])
         return start, length
 
     starts, lengths = tf.map_fn(
         get_idx,
-        [padded_segs, num_words],
+        padded_segs,
         (tf.int32, tf.int32),
         parallel_iterations=128,
         back_prop=False,

@@ -73,6 +73,17 @@ class Vocab(object):
         else:
             return None
 
+    def key2count(self, key):
+        """given key return count"""
+        value = self.vocab_dict.get(key)
+        if value:
+            if value[0] < self.cutoff:
+                return value[1]
+            else:
+                return 0
+        else:
+            return 0
+
     def size(self):
         """return size of the vocab"""
         return min(self.cutoff, len(self.vocab_list))
@@ -306,7 +317,7 @@ def labels_to_ids_array(labels, vocab):
         label_ids_list.append(label_ids)
     max_char_length = max(map(lambda i: len(i), label_ids_list))
     label_ids_list = map(lambda i: i+[0]*(max_char_length-len(i)), label_ids_list)
-    return np.array(label_ids_list)
+    return label_ids_list
 
 def words_to_token_ids(words, vocab):
     """
@@ -317,7 +328,9 @@ def words_to_token_ids(words, vocab):
     segs = []
     for word in words:
         word_ids = vocab.sentence_to_token_ids(word)
-        if len(word_ids) == 0:
+        if len(word_ids) > 100:
+            word_ids = [vocab.key2idx("_UNK")]
+        elif len(word_ids) == 0:
             continue
         seqs.extend(word_ids)
         segs.extend([1.0]+[0.0]*(len(word_ids)-1))
