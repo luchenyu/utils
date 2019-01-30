@@ -3051,4 +3051,4 @@ def unique_2d(x):
     #get actual values from unique indexes
     unique_x=tf.gather(x,r_cond_mul4)
 
-    return unique_x
+    return unique_x, r_cond_mul4
