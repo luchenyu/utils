@@ -116,9 +116,8 @@ class Vocab(object):
         """encode a sentence in plain text into a sequence of token ids
         """
         if not type(text) is list:
-            text = text.strip()
             text = map(lambda i: i.encode('utf-8'), list(text.decode('utf-8')))
-        seq = [self.key2idx(key) for key in text]
+        seq = [self.key2idx('_EOS') if key == '\t' else self.key2idx(key) for key in text]
         seq = [idx if idx!=None else self.key2idx("_UNK") for idx in seq]
         return seq
 
@@ -324,16 +323,18 @@ def words_to_token_ids(words, vocab):
     Turn outputs of posseg into two seq of ids
     """
 
-    seqs = []
-    segs = []
-    for word in words:
+    def _process(word):
         word_ids = vocab.sentence_to_token_ids(word)
-        if len(word_ids) > 100:
+        if len(word_ids) > 30:
             word_ids = [vocab.key2idx("_UNK")]
-        elif len(word_ids) == 0:
-            continue
-        seqs.extend(word_ids)
-        segs.extend([1.0]+[0.0]*(len(word_ids)-1))
+        if len(word_ids) == 0:
+            return ([], [])
+        else:
+            return (word_ids, [1.0]+[0.0]*(len(word_ids)-1))
+    zipped_list = [_process(word) for word in words]
+    (seqs, segs) = zip(*zipped_list)
+    seqs = [i for w in seqs for i in w]
+    segs = [i for w in segs for i in w]
     if len(segs) > 0:
         segs.append(1.0)
     return seqs, segs
