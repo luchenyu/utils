@@ -247,7 +247,7 @@ class Cutter(object):
         cutter: jieba|thulac
         """
         if self._cutter == 'jieba':
-            s = list(jieba.cut(text))
+            s = jieba.lcut(text)
         elif self._cutter == 'thulac':
             s = self.thulac.cut(text)
             s = map(lambda i: (i[0], self.thulac_pos_map.lookup(i[1])), s)

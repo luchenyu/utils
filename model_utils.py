@@ -60,15 +60,17 @@ def fully_connected(inputs,
             'weights',
             shape=weights_shape,
             dtype=dtype,
-            initializer=tf.contrib.layers.xavier_initializer(),
-            trainable=trainable)
+            initializer=tf.initializers.variance_scaling(mode='fan_in'),
+            trainable=trainable,
+            aggregation=tf.VariableAggregation.MEAN)
         weights_norm = tf.get_variable(
             'weights_norm',
             shape=[num_outputs,],
             dtype=dtype,
-            initializer=tf.contrib.layers.xavier_initializer(),
+            initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
             collections=weights_collections,
-            trainable=trainable)
+            trainable=trainable,
+            aggregation=tf.VariableAggregation.MEAN)
         if trainable and weight_normalize:
             norm_op = weights.assign(
                 tf.nn.l2_normalize(
@@ -80,15 +82,16 @@ def fully_connected(inputs,
             with tf.control_dependencies([norm_op]):
                 weights = tf.cond(
                     tf.cast(is_training, tf.bool),
-                    lambda: tf.nn.l2_normalize(weights, 0)*tf.exp(weights_norm),
+                    lambda: tf.nn.l2_normalize(weights, 0) * tf.exp(weights_norm),
                     lambda: tf.identity(weights))
         biases = tf.get_variable(
             'biases',
             shape=[num_outputs,],
             dtype=dtype,
-            initializer=tf.zeros_initializer(),
+            initializer=tf.initializers.zeros(),
             collections=biases_collections,
-            trainable=trainable)
+            trainable=trainable,
+            aggregation=tf.VariableAggregation.MEAN)
 
         if len(static_shape) > 2:
             # Reshape inputs
@@ -162,21 +165,23 @@ def convolution2d(inputs,
                 weights_shape = list(kernel_size) + [num_filters_in, output_size]
                 weights = tf.get_variable(
                     name='weights',
-                    shape=weights_shape,
+                    shape=[kernel_size[0]*kernel_size[1]*num_filters_in, output_size],
                     dtype=dtype,
-                    initializer=tf.contrib.layers.xavier_initializer(),
-                    trainable=trainable)
+                    initializer=tf.initializers.variance_scaling(mode='fan_in'),
+                    trainable=trainable,
+                    aggregation=tf.VariableAggregation.MEAN)
                 weights_norm = tf.get_variable(
                     'weights_norm',
                     shape=[output_size,],
                     dtype=dtype,
-                    initializer=tf.contrib.layers.xavier_initializer(),
+                    initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
                     collections=weights_collections,
-                    trainable=trainable)
+                    trainable=trainable,
+                    aggregation=tf.VariableAggregation.MEAN)
                 if is_training != False and weight_normalize:
                     norm_op = weights.assign(
                         tf.nn.l2_normalize(
-                            weights, [0,1,2]) * tf.exp(weights_norm))
+                            weights, 0) * tf.exp(weights_norm))
                     norm_op = tf.cond(
                         tf.logical_or(tf.cast(sc.reuse, tf.bool),tf.logical_not(tf.cast(is_training, tf.bool))),
                         lambda: tf.zeros([]),
@@ -184,15 +189,17 @@ def convolution2d(inputs,
                     with tf.control_dependencies([norm_op]):
                         weights = tf.cond(
                             tf.cast(is_training, tf.bool),
-                            lambda: tf.nn.l2_normalize(weights, [0,1,2])*tf.exp(weights_norm),
+                            lambda: tf.nn.l2_normalize(weights, 0) * tf.exp(weights_norm),
                             lambda: tf.identity(weights))
                 biases = tf.get_variable(
                     name='biases',
                     shape=[output_size,],
                     dtype=dtype,
-                    initializer=tf.zeros_initializer(),
+                    initializer=tf.initializers.zeros(),
                     collections=biases_collections,
-                    trainable=trainable)
+                    trainable=trainable,
+                    aggregation=tf.VariableAggregation.MEAN)
+                weights = tf.reshape(weights, weights_shape)
                 outputs = tf.nn.convolution(
                     inputs, weights, padding='SAME', dilation_rate=dilation_rate) + biases
                 if group_size:
@@ -283,6 +290,42 @@ def mpconv2d(inputs,
 
 ### Regularization ###
 
+def layer_norm(inputs,
+               begin_norm_axis=-1,
+               is_training=True,
+               scope=None):
+    """Simple wrapper of tf.contrib.layers.layer_norm.
+
+    """
+
+    with tf.variable_scope(scope, 'layer_norm') as sc:
+
+        dtype = inputs.dtype.base_dtype
+        trainable = (is_training != False)
+        collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+        if trainable:
+            collections.append(tf.GraphKeys.WEIGHTS)
+        beta = tf.get_variable(
+            'beta',
+            shape=[],
+            dtype=dtype,
+            initializer=tf.initializers.zeros(),
+            collections=collections,
+            trainable=trainable,
+            aggregation=tf.VariableAggregation.MEAN)
+        gamma = tf.get_variable(
+            'gamma',
+            shape=[],
+            dtype=dtype,
+            initializer=tf.initializers.ones(),
+            collections=collections,
+            trainable=trainable,
+            aggregation=tf.VariableAggregation.MEAN)
+        outputs = tf.contrib.layers.layer_norm(
+            inputs, center=False, scale=False, begin_norm_axis=begin_norm_axis)
+        outputs = beta + gamma*outputs
+    return outputs
+
 def params_decay(decay):
     """ Add ops to decay weights and biases
 
@@ -303,14 +346,16 @@ def params_decay(decay):
 def optimize_loss(loss,
                   global_step,
                   optimizer,
-                  var_list=None,
+                  wd=.0,
                   scope=None):
     """ Optimize the model using the loss.
 
     """
 
-    grad_var_list = optimizer.compute_gradients(loss, var_list)
-    learning_rate = optimizer._lr
+    wd = .0 if wd == None else wd
+    var_list = tf.trainable_variables() if scope == None else scope.trainable_variables()
+    grad_var_list = optimizer.compute_gradients(
+        loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
 
     candidates = tf.get_collection(tf.GraphKeys.WEIGHTS, scope=scope) + \
                  tf.get_collection(tf.GraphKeys.BIASES, scope=scope)
@@ -326,9 +371,7 @@ def optimize_loss(loss,
             continue
         update_ops.append(
             var.assign(
-                (1.0 - 0.1*learning_rate)*var + \
-                (0.1*learning_rate)*tf.truncated_normal(
-                    tf.shape(var), stddev=0.01)))
+                (1.0 - wd)*var))
     with tf.control_dependencies(update_ops):
         train_op = optimizer.apply_gradients(
             grad_var_list,
@@ -1030,10 +1073,10 @@ def attention_simple(querys,
         values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
         
         logits = tf.matmul(querys, keys, transpose_b=True)
-        logits /= tf.sqrt(tf.to_float(size))
+        logits /= tf.sqrt(tf.cast(size, tf.float32))
 
         if masks != None:
-            weights = tf.expand_dims(tf.to_float(masks), axis=1)
+            weights = tf.expand_dims(tf.cast(masks, tf.float32), axis=1)
         else:
             weights = tf.ones(tf.shape(logits))
         logits *= weights
@@ -1041,10 +1084,18 @@ def attention_simple(querys,
         weights = tf.pad(weights, [[0,0], [0,0], [0,0], [1,0]], constant_values=1.0)
 
         probs = tf.exp(logits) * weights
-        probs /= (tf.reduce_sum(probs, axis=-1, keepdims=True) + 1e-20)
+        probs /= tf.reduce_sum(probs, axis=-1, keepdims=True)
         probs = probs[:,:,:,1:]
         attn_feats = tf.matmul(probs, values)
         attn_feats = tf.concat(tf.unstack(attn_feats, axis=1), axis=-1)
+        attn_feats += fully_connected(
+            tf.nn.relu(attn_feats),
+            size,
+            dropout=dropout,
+            is_training=is_training,
+            scope="res_block")
+        attn_feats = layer_norm(
+            attn_feats, begin_norm_axis=-1, is_training=is_training)
         if single_query:
             attn_feats = tf.squeeze(attn_feats, 1)
     return attn_feats
@@ -1143,7 +1194,7 @@ def attention_with_position(querys,
             logits += tf.matmul(query_position_translated_embeds, key_position_embeds, transpose_b=True)
         logits /= tf.sqrt(float(size))
         if masks != None:
-            weights = tf.expand_dims(tf.to_float(masks), axis=1)
+            weights = tf.expand_dims(tf.cast(masks, tf.float32), axis=1)
         else:
             weights = tf.ones(tf.shape(logits))
         logits = logits * weights
@@ -1261,7 +1312,7 @@ def attention_write(querys,
             logits += tf.matmul(query_position_translated_embeds, key_position_embeds, transpose_b=True)
         logits /= tf.sqrt(float(size))
         if masks != None:
-            weights = tf.expand_dims(tf.to_float(masks), axis=1)
+            weights = tf.expand_dims(tf.cast(masks, tf.float32), axis=1)
         else:
             weights = tf.ones(tf.shape(logits))
         logits = logits * weights
@@ -1312,8 +1363,8 @@ def embed_position(position_idx,
     batch_size = tf.shape(position_idx)[0]
     seq_len = tf.shape(position_idx)[1]
 
-    position_idx = tf.to_float(position_idx)
-    size = tf.to_float(size)
+    position_idx = tf.cast(position_idx, tf.float32)
+    size = tf.cast(size, tf.float32)
     position_j = 1. / tf.pow(10000., \
                              2 * tf.range(size / 2, dtype=tf.float32 \
                             ) / size)
@@ -1385,9 +1436,6 @@ def transformer(keys,
                 attn_feats= attention_simple(concat_feats, concat_feats, concat_feats,
                     num_head=num_head, masks=masks, size=value_size,
                     dropout=dropout, is_training=is_training)
-                attn_feats = tf.contrib.layers.layer_norm(
-                    attn_feats, begin_norm_axis=-1,
-                    variables_collections=collections, trainable=trainable)
                 concat_feats = tf.concat([keys, attn_feats], axis=-1)
                 values += MLP(
                     concat_feats,
@@ -1396,9 +1444,8 @@ def transformer(keys,
                     value_size,
                     dropout=dropout,
                     is_training=is_training)
-                values = tf.contrib.layers.layer_norm(
-                    values, begin_norm_axis=-1,
-                    variables_collections=collections, trainable=trainable)
+                values = layer_norm(
+                    values, begin_norm_axis=-1, is_training=is_training)
     return values
 
 def transformer2(keys,
@@ -1667,7 +1714,7 @@ def dynamic_route(num_outputs,
 
     if size == None:
         size = values.get_shape()[-1].value
-    seq_len = tf.expand_dims(tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True), -1)
+    seq_len = tf.expand_dims(tf.reduce_sum(tf.cast(masks, tf.float32), 1, keep_dims=True), -1)
     masks = tf.tile(tf.expand_dims(masks, 1), [1, num_outputs, 1])
     votes = MLP(tf.nn.relu(values),
                 2,
@@ -1738,7 +1785,7 @@ def dynamic_route2(num_outputs,
 
         if size == None:
              size = input_poses.get_shape()[-1].value
-        seq_len = tf.expand_dims(tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True), -1)
+        seq_len = tf.expand_dims(tf.reduce_sum(tf.cast(masks, tf.float32), 1, keep_dims=True), -1)
         masks = tf.tile(tf.expand_dims(masks, 1), [1, num_outputs, 1])
         votes = MLP(input_poses,
                     2,
@@ -1825,7 +1872,7 @@ def dynamic_route3(num_outputs,
         num_votes = 16
         batch_size = tf.shape(input_poses)[0]
         length = tf.shape(input_poses)[1]
-        seq_len = tf.expand_dims(tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True), -1)
+        seq_len = tf.expand_dims(tf.reduce_sum(tf.cast(masks, tf.float32), 1, keep_dims=True), -1)
         masks = tf.tile(tf.expand_dims(tf.expand_dims(masks, 1), 2), [1, num_outputs, num_votes, 1])
         #votes = MLP(input_poses,
         #            2,
@@ -1934,7 +1981,7 @@ def dynamic_route4(values,
     batch_size = tf.shape(values)[0]
     length = tf.shape(values)[1]
     num_modes = tf.shape(values)[2]
-    seq_len = tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True)
+    seq_len = tf.reduce_sum(tf.cast(masks, tf.float32), 1, keep_dims=True)
     masks = tf.tile(tf.expand_dims(masks, -1), [1, 1, num_modes])
     # votes [batch_size X length X num_modes X size]
     votes = fully_connected(tf.nn.relu(values),
@@ -1983,7 +2030,7 @@ def dynamic_route5(values,
     length = tf.shape(values)[1]
     num_modes = values.get_shape()[2].value
 
-    seq_len = tf.reduce_sum(tf.to_float(masks), 1, keep_dims=True)
+    seq_len = tf.reduce_sum(tf.cast(masks, tf.float32), 1, keep_dims=True)
     maskss = tf.tile(tf.expand_dims(masks, -1), [1, 1, num_modes])
     # votes [batch_size X length X num_modes X size]
     votes = values
@@ -2119,7 +2166,8 @@ class AttentionCell(object):
                 dtype=tf.float32,
                 initializer=tf.initializers.truncated_normal(0.0, 0.01),
                 trainable=trainable,
-                collections=collections)
+                collections=collections,
+                aggregation=tf.VariableAggregation.MEAN)
 
             batch_size = tf.shape(inputs)[0]
             input_dim = inputs.get_shape()[-1].value
@@ -2323,7 +2371,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
         cov_penalties = []
         for i in range(self.num_attention):
             if self.use_coverage[i]:
-                mask = tf.to_float(state[2])
+                mask = tf.cast(state[2], tf.float32)
                 coverage = state[4]
                 cov_penalty = tf.reduce_sum(
                     tf.log(tf.minimum(coverage+1e-5, 1.0)) * mask,
@@ -2516,8 +2564,8 @@ def stochastic_dec(length,
         score = tf.reduce_sum(tf.one_hot(symbol, tf.shape(logits)[1]) * logits, axis=1)
         symbol = tf.where(mask,
                           tf.zeros([batch_size*num_candidates], dtype=tf.int32),
-                          tf.to_int32(symbol))
-        score *= tf.to_float(tf.logical_not(mask))
+                          tf.cast(symbol, tf.int32))
+        score *= tf.cast(tf.logical_not(mask), tf.float32)
         mask = tf.equal(symbol, 0)
         seqs = seqs.write(i+1, symbol)
         scores = scores.write(i+1, score)
@@ -2596,12 +2644,12 @@ def beam_dec(length,
         # add the path and score of the candidates in the current beam to the lists
         fn = lambda seq: tf.size(tf.unique(seq)[0])
         uniq_len = tf.reshape(
-            tf.to_float(tf.map_fn(fn,
+            tf.cast(tf.map_fn(fn,
                                   pths,
                                   dtype=tf.int32,
                                   parallel_iterations=100000,
                                   back_prop=False,
-                                  swap_memory=True)),
+                                  swap_memory=True), tf.float32),
             [batch_size, beam_size])
         close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
             tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
@@ -2715,12 +2763,12 @@ def stochastic_beam_dec(length,
 
         fn = lambda seq: tf.size(tf.unique(seq)[0])
         uniq_len = tf.reshape(
-            tf.to_float(tf.map_fn(fn,
+            tf.cast(tf.map_fn(fn,
                                   pths,
                                   dtype=tf.int32,
                                   parallel_iterations=100000,
                                   back_prop=False,
-                                  swap_memory=True)),
+                                  swap_memory=True), tf.float32),
             [batch_size, beam_size])
         close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
             tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
@@ -2764,7 +2812,7 @@ def stochastic_beam_dec(length,
     masks = tf.reshape(tf.transpose(masks.stack(), [1,0,2]), [batch_size, -1])
     fillers = tf.tile(tf.expand_dims(tf.reduce_min(scores, 1) - 20.0, 1), [1, tf.shape(scores)[1]])
     scores = tf.where(masks, scores, fillers)
-    indices = tf.to_int32(tf.multinomial(scores * (7**gamma), num_candidates))
+    indices = tf.cast(tf.multinomial(scores * (7**gamma), num_candidates), tf.int32)
     indices = tf.reshape(tf.expand_dims(tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices, [-1])
     best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
     best_scores = tf.reshape(tf.gather(tf.reshape(scores, [-1]), indices), [batch_size, num_candidates])
@@ -2938,7 +2986,7 @@ def slice_words(seqs, segs, get_idxs=False, encodes=None):
     padded_seg_masks2 = tf.logical_xor(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
     padded_segs = tf.logical_or(padded_segs, padded_seg_masks2)
 
-    num_words = tf.reduce_sum(tf.to_int32(padded_segs), axis=1)-1
+    num_words = tf.reduce_sum(tf.cast(padded_segs, tf.int32), axis=1)-1
     max_num_word = tf.maximum(tf.reduce_max(num_words), 1)
 
     def get_idx(padded_seg):
@@ -2962,14 +3010,14 @@ def slice_words(seqs, segs, get_idxs=False, encodes=None):
     results = []
 
     segmented_seqs = slice_fragments(
-        tf.to_float(tf.expand_dims(seqs, axis=-1)),
+        tf.cast(tf.expand_dims(seqs, axis=-1), tf.float32),
         starts,
         lengths)
-    segmented_seqs = tf.to_int32(tf.squeeze(segmented_seqs, axis=-1))
+    segmented_seqs = tf.cast(tf.squeeze(segmented_seqs, axis=-1), tf.int32)
     results.append(segmented_seqs)
 
     if get_idxs:
-        idx_starts = tf.to_int32(tf.logical_not(tf.sequence_mask(starts, max_length)))
+        idx_starts = tf.cast(tf.logical_not(tf.sequence_mask(starts, max_length)), tf.int32)
         idx_ends = tf.sequence_mask(starts+lengths, max_length, dtype=tf.int32)
         idx_ends *= tf.expand_dims(tf.expand_dims(tf.range(1, max_num_word+1, dtype=tf.int32), 0), 2)
         segment_idxs = tf.reduce_sum(idx_starts * idx_ends, axis=1)-1
@@ -2995,7 +3043,7 @@ def stitch_chars(segmented_seqs):
     """
 
     masks = tf.greater(segmented_seqs, 0)
-    num_chars = tf.reduce_sum(tf.to_int32(masks), axis=[1,2])
+    num_chars = tf.reduce_sum(tf.cast(masks, tf.int32), axis=[1,2])
     max_num_char = tf.reduce_max(num_chars)
 
     def stitch(segmented_seq):
