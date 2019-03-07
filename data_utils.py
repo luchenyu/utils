@@ -3,13 +3,7 @@ import gensim, os, re, sys
 import numpy as np
 import unicodedata
 import nltk
-import jieba
-import jieba.posseg as pseg
-import thulac
-from pyltp import Segmentor
-from pyltp import Postagger
-import pyopencc
-import synonyms
+from hanziconv import HanziConv
 
 WORD2VEC = None
 __location__ = os.path.realpath(
@@ -226,13 +220,18 @@ class Cutter(object):
 
         self._cutter = _cutter
         if _cutter == 'jieba':
+            import jieba
+            import jieba.posseg as pseg
             jieba.enable_parallel(64)
 
         elif _cutter == 'thulac':
+            import thulac
             self.thulac = thulac.thulac()
             self.thulac_pos_map = Dict(os.path.join(__location__, 'thulac_pos_map'))
 
         elif _cutter == 'ltp':
+            from pyltp import Segmentor
+            from pyltp import Postagger
             ltp_path = os.path.join(__location__, "ltp_data_v3.4.0")
             self.ltp_seg = Segmentor()
             self.ltp_seg.load(os.path.join(ltp_path, "cws.model"))
@@ -265,6 +264,7 @@ class Synonyms(object):
     Get synonyms using various resources!
     """
     def __init__(self):
+        import synonyms
         with open(os.path.join(__location__, 'cilin.txt'), 'r') as f:
             cilin = map(lambda i: i.strip().split()[1:], f.readlines())
         self.cilin_map = dict(zip(range(len(cilin)), cilin))
@@ -296,10 +296,9 @@ class Synonyms(object):
                 results = []
         return results
 
-zht2zhs = pyopencc.OpenCC('zht2zhs.ini').convert
 def normalize(text):
     text = unicodedata.normalize('NFKC', text.decode('utf-8')).encode('utf-8')
-    text = zht2zhs(text)
+    text = HanziConv.toSimplified(text)
     return text
 
 def labels_to_ids_array(labels, vocab):

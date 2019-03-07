@@ -365,13 +365,14 @@ def optimize_loss(loss,
     for op in update_ops:
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
-    for grad_var in grad_var_list:
-        grad, var = grad_var
-        if (grad == None) or (not var in candidates):
-            continue
-        update_ops.append(
-            var.assign(
-                (1.0 - wd)*var))
+    if wd > .0:
+        for grad_var in grad_var_list:
+            grad, var = grad_var
+            if (grad == None) or (not var in candidates):
+                continue
+            update_ops.append(
+                var.assign(
+                    (1.0 - wd)*var))
     with tf.control_dependencies(update_ops):
         train_op = optimizer.apply_gradients(
             grad_var_list,
