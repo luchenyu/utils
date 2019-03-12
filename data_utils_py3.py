@@ -301,62 +301,56 @@ def normalize(text):
     text = HanziConv.toSimplified(text)
     return text
 
-def labels_to_ids_array(labels, vocab):
+def tokens_to_token_ids(tokens, vocab):
+    """encode a sentence in plain text into a sequence of token ids
+    args:
+        tokens: list of tokens
+        vocab: vocab of tokens
+    return:
+        token_id_list: list of token_id
+    """
+    if not type(tokens) is list:
+        tokens = list(tokens)
+    token_id_list = [vocab.key2idx(token) for token in tokens]
+    token_id_list = [idx if idx!=None else vocab.key2idx("_UNK") for idx in token_id_list]
+    return token_id_list
+
+def tokens_to_char_ids(tokens, char_vocab):
     """
     args:
-        labels: list of labels
-        vocab: vocab of characters
+        tokens: list of tokens
+        char_vocab: vocab of characters
     return:
-        label_ids: num_labels x char_length
+        char_ids_list: list of char_ids
     """
-    label_ids_list = []
-    for label in labels:
-        label_ids = vocab.sentence_to_token_ids(label)
-        label_ids_list.append(label_ids)
-    max_char_length = max(map(lambda i: len(i), label_ids_list))
-    label_ids_list = map(lambda i: i+[0]*(max_char_length-len(i)), label_ids_list)
-    return label_ids_list
+    char_ids_list = [tokens_to_token_ids(i, char_vocab) for i in tokens]
+    max_token_length = max([len(i) for i in char_ids_list])
+    char_ids_list = [i+[0]*(max_token_length-len(i)) for i in char_ids_list]
+    return char_ids_list
 
-def words_to_token_ids(words, vocab):
+def tokens_to_seqs_segs(tokens, char_vocab):
     """
     Turn outputs of posseg into two seq of ids
+    args:
+        tokens: list of tokens
+        char_vocab: vocab of characters
+    return:
+        seqs: list of char_ids
+        segs: list of 1/0 segment flags
     """
 
-    def _process(word):
-        word_ids = vocab.sentence_to_token_ids(word)
-        if len(word_ids) > 30:
-            word_ids = [vocab.key2idx("_UNK")]
-        if len(word_ids) == 0:
+    def _process(token):
+        char_ids = tokens_to_token_ids(token, char_vocab)
+        if len(char_ids) > 30:
+            char_ids = [char_vocab.key2idx("_UNK")]
+        if len(char_ids) == 0:
             return ([], [])
         else:
-            return (word_ids, [1.0]+[0.0]*(len(word_ids)-1))
-    zipped_list = [_process(word) for word in words]
+            return (char_ids, [1.0]+[0.0]*(len(char_ids)-1))
+    zipped_list = [_process(token) for token in tokens]
     (seqs, segs) = zip(*zipped_list)
     seqs = [i for w in seqs for i in w]
     segs = [i for w in segs for i in w]
     if len(segs) > 0:
         segs.append(1.0)
     return seqs, segs
-
-def posseg_to_token_ids(pos_segs, vocab, posseg_vocab):
-    """
-    Turn outputs of posseg into two seq of ids
-    """
-
-    seqs = []
-    segs = []
-    pos_labels = []
-    for token in pos_segs:
-        word, tag = token
-        if tag == None:
-            print(pos_segs)
-        word_ids = vocab.sentence_to_token_ids(word)
-        if len(word_ids) == 0:
-            continue
-        seqs.extend(word_ids)
-        segs.extend([1.0]+[0.0]*(len(word_ids)-1))
-        pos_labels.append(tag)
-    if len(segs) > 0:
-        segs.append(1.0)
-    pos_labels = posseg_vocab.sentence_to_token_ids(pos_labels)
-    return seqs, segs, pos_labels
