@@ -21,7 +21,7 @@ from tensorflow.python.util import nest
 
 def fully_connected(inputs,
                     num_outputs,
-                    weight_normalize=True,
+                    weight_normalize=False,
                     activation_fn=None,
                     dropout=None,
                     is_training=True,
@@ -121,7 +121,7 @@ def convolution2d(inputs,
                   dilation_rates=None,
                   pool_size=None,
                   group_size=None,
-                  weight_normalize=True,
+                  weight_normalize=False,
                   activation_fn=None,
                   dropout=None,
                   is_training=True,
@@ -366,17 +366,14 @@ def optimize_loss(loss,
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
     if wd > .0:
-        for grad_var in grad_var_list:
+        for i, grad_var in enumerate(grad_var_list):
             grad, var = grad_var
             if (grad == None) or (not var in candidates):
                 continue
-            update_ops.append(
-                var.assign(
-                    (1.0 - wd)*var))
-    with tf.control_dependencies(update_ops):
-        train_op = optimizer.apply_gradients(
-            grad_var_list,
-            global_step=global_step)
+            grad_var_list[i] = (grad+wd*var, var)
+    train_op = optimizer.apply_gradients(
+        grad_var_list,
+        global_step=global_step)
     return train_op
 
 ### Nets ###
