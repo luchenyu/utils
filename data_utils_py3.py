@@ -50,18 +50,19 @@ class Vocab(object):
             self.embedding_init = None
 
     def idx2key(self, idx):
-        """given index return key"""
+        """given index return key, 1-based"""
+        idx -= 1
         if idx >= min(self.cutoff, len(self.vocab_list)):
             return None
         else:
             return self.vocab_list[idx]
 
     def key2idx(self, key):
-        """given key return index"""
+        """given key return index, 1-based"""
         value = self.vocab_dict.get(key)
         if value:
             if value[0] < self.cutoff:
-                return value[0]
+                return value[0]+1
             else:
                 return None
         else:
@@ -105,22 +106,6 @@ class Vocab(object):
         for idx, item in enumerate(self.vocab_list):
             self.vocab_dict[item][0] = idx
 
-
-    def sentence_to_token_ids(self, text):
-        """encode a sentence in plain text into a sequence of token ids
-        """
-        if not type(text) is list:
-            text = list(text)
-        seq = [self.key2idx('_EOS') if key == '\t' else self.key2idx(key) for key in text]
-        seq = [idx if idx!=None else self.key2idx("_UNK") for idx in seq]
-        return seq
-
-    def token_ids_to_sentence(self, token_ids):
-        """decode a sequence of token ids to a sentence
-        """
-        text = ''.join(
-            [self.idx2key(i) if self.idx2key(i) != None and self.idx2key(i) != '_UNK' and self.idx2key(i) != '_EOS' else '' for i in token_ids])
-        return text
 
 class Dict(object):
     def __init__(self, filename):
@@ -302,7 +287,7 @@ def normalize(text):
     return text
 
 def tokens_to_token_ids(tokens, vocab):
-    """encode a sentence in plain text into a sequence of token ids
+    """encode a sentence in plain text into a sequence of token ids, 1-based
     args:
         tokens: list of tokens
         vocab: vocab of tokens
@@ -317,6 +302,7 @@ def tokens_to_token_ids(tokens, vocab):
 
 def tokens_to_char_ids(tokens, char_vocab):
     """
+    tokens to character ids, 1-based
     args:
         tokens: list of tokens
         char_vocab: vocab of characters
@@ -330,7 +316,7 @@ def tokens_to_char_ids(tokens, char_vocab):
 
 def tokens_to_seqs_segs(tokens, char_vocab):
     """
-    Turn outputs of posseg into two seq of ids
+    Turn outputs of posseg into two seq of ids, 1-based
     args:
         tokens: list of tokens
         char_vocab: vocab of characters
