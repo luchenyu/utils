@@ -394,13 +394,12 @@ def GLU(inputs,
                            reuse=reuse) as sc:
         feats = fully_connected(
             inputs,
-            output_size+int(output_size/8),
+            2*output_size,
             dropout=dropout,
             is_training=is_training,
             scope="feats")
-        projs, gates = tf.split(feats, [output_size, int(output_size/8)], axis=-1)
+        projs, gates = tf.split(feats, 2, axis=-1)
         gates = tf.sigmoid(gates)
-        gates = tf.concat([gates]*8, axis=-1)
         outputs = projs*gates
         return outputs
 
