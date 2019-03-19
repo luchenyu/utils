@@ -1062,20 +1062,19 @@ def attention_simple(querys,
         values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
         
         logits = tf.matmul(querys, keys, transpose_b=True)
-        logits /= tf.sqrt(tf.cast(size, tf.float32))
 
         if masks != None:
             weights = tf.expand_dims(tf.cast(masks, tf.float32), axis=1)
         else:
             weights = tf.ones(tf.shape(logits))
-        logits *= weights
+        logits *= weights * tf.sqrt(1.0/tf.cast(size, tf.float32))
         logits = tf.pad(logits, [[0,0], [0,0], [0,0], [1,0]])
         weights = tf.pad(weights, [[0,0], [0,0], [0,0], [1,0]], constant_values=1.0)
 
         probs = tf.exp(logits) * weights
-        probs /= tf.reduce_sum(probs, axis=-1, keepdims=True)
+        probs_sum = tf.reduce_sum(probs, axis=-1, keepdims=True)
         probs = probs[:,:,:,1:]
-        attn_feats = tf.matmul(probs, values)
+        attn_feats = tf.matmul(probs, values) / probs_sum
         attn_feats = tf.concat(tf.unstack(attn_feats, axis=1), axis=-1)
         if single_query:
             attn_feats = tf.squeeze(attn_feats, 1)
@@ -2197,7 +2196,7 @@ class AttentionCell(object):
                 tf.tile(tf.expand_dims(tf.range(enc_length), 0), [batch_size, 1]),
                 int(self.size/4))
             posit_embeds_list.append(posit_embeds)
-            field_embeds = tf.zeros_like(posit_embeds) + tf.nn.embedding_lookup(field_embedding, 0)
+            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[0]]), [batch_size, enc_length, 1])
             field_embeds_list.append(field_embeds)
             token_embeds_list.append(encodes)
 
@@ -2206,7 +2205,7 @@ class AttentionCell(object):
                 tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1]),
                 int(self.size/4))
             posit_embeds_list.append(posit_embeds)
-            field_embeds = tf.zeros_like(posit_embeds) + tf.nn.embedding_lookup(field_embedding, 1)
+            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[1]]), [batch_size, end_idx, 1])
             field_embeds_list.append(field_embeds)
             token_embeds_list.append(inputs)
 
@@ -2215,7 +2214,7 @@ class AttentionCell(object):
                 tf.tile(tf.expand_dims(tf.range(start_idx+1, end_idx+1), 0), [batch_size, 1]),
                 int(self.size/4))
             posit_embeds_list.append(posit_embeds)
-            field_embeds = tf.zeros_like(posit_embeds) + tf.nn.embedding_lookup(field_embedding, 1)
+            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[1]]), [batch_size, length, 1])
             field_embeds_list.append(field_embeds)
             token_embeds_list.append(tf.zeros([batch_size, length, enc_dim]))
 
