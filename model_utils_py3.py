@@ -1037,7 +1037,7 @@ def attention_simple(querys,
         if size == None:
             size = values.get_shape()[-1].value
 
-        querys = GLU(
+        querys = fully_connected(
             querys,
             size,
             dropout=dropout,
@@ -1045,7 +1045,7 @@ def attention_simple(querys,
             scope="query_projs")
         querys = tf.stack(tf.split(querys, num_head, axis=-1), axis=1)
 
-        keys = GLU(
+        keys = fully_connected(
             keys,
             size,
             dropout=dropout,
