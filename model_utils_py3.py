@@ -1606,7 +1606,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                  self_attention_idx=0,
                  use_copy=None,
                  use_coverage=None,
-                 attention_fn=attention,
+                 attention_fn=attention_simple,
                  is_training=True):
         self.cell = cell
         self.num_attention = num_attention
