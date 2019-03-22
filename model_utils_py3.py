@@ -1340,6 +1340,8 @@ def transformer(field_encodes,
                 token_embeds,
                 num_layers,
                 layer_size,
+                extra_posit_embeds=None,
+                extra_encodes=None,
                 num_head=8,
                 masks=None,
                 dropout=None,
@@ -1348,6 +1350,10 @@ def transformer(field_encodes,
                 scope=None):
     """Transformer encoder
        in the form of key-value
+       args:
+           extra_encodes: batch_size x (num_layers+1) x extra_length x layer_size
+       return:
+           encodes: batch_size x (num_layers+1) x length x layer_size
     """
 
     with tf.variable_scope(scope,
@@ -1375,13 +1381,20 @@ def transformer(field_encodes,
             masks = tf.ones([batch_size, length, length], dtype=tf.bool)
         masks = tf.logical_and(masks,
             tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)))
+        if not extra_encodes is None:
+            extra_encodes_list = tf.unstack(extra_encodes, axis=1)
+        encodes_list = []
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
                 encodes_normed = layer_norm(
                     token_encodes+field_encodes, begin_norm_axis=-1, is_training=is_training)
+                encodes_list.append(encodes_normed)
                 querys = tf.concat([posit_embeds, encodes_normed], axis=-1)
                 keys = querys
                 values = encodes_normed
+                if not extra_encodes is None:
+                    keys = tf.concat([keys, tf.concat([extra_posit_embeds, extra_encodes_list[i]], axis=-1)], axis=1)
+                    values = tf.concat([values, extra_encodes_list[i]], axis=1)
                 token_encodes += attention_simple(querys, keys, values,
                     num_head=num_head, masks=masks, size=layer_size,
                     dropout=dropout, is_training=is_training)
@@ -1395,8 +1408,10 @@ def transformer(field_encodes,
                     activation_fn=tf.nn.relu,
                     dropout=dropout,
                     is_training=is_training)
-        encodes = layer_norm(
+        encodes_normed = layer_norm(
             token_encodes+field_encodes, begin_norm_axis=-1, is_training=is_training)
+        encodes_list.append(encodes_normed)
+        encodes = tf.stack(encodes_list, axis=1)
     return encodes
 
 
@@ -1586,7 +1601,7 @@ class AttentionCell(object):
                 dropout=self.dropout,
                 is_training=self.is_training,
                 scope="transformer")
-            outputs = outputs[:,enc_length+end_idx:]
+            outputs = outputs[:,-1,enc_length+end_idx:]
             outputs = fully_connected(
                 outputs,
                 self.size,
