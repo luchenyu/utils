@@ -347,13 +347,14 @@ def optimize_loss(loss,
                   global_step,
                   optimizer,
                   wd=.0,
+                  var_list=None,
                   scope=None):
     """ Optimize the model using the loss.
 
     """
 
     wd = .0 if wd == None else wd
-    var_list = tf.trainable_variables() if scope == None else scope.trainable_variables()
+    var_list = tf.trainable_variables(scope=scope) if var_list == None else var_list
     grad_var_list = optimizer.compute_gradients(
         loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
 
