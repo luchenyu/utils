@@ -1478,8 +1478,7 @@ class AttentionCell(object):
     inputs: batch_size x [input_length] x input_dim
     state: tuple(decoder_inputs, encodes, masks)
         decoder_inputs: TensorArray with last item be the history inputs with batch_size x length x input_dim
-        encodes: batch_size x enc_length x enc_dim
-        masks: batch_size x enc_length
+        field_embeds: batch_size x 2 x 3*dim
     """
     
 
@@ -1504,23 +1503,10 @@ class AttentionCell(object):
             if trainable:
                 collections.append(tf.GraphKeys.WEIGHTS)
 
-            field_embedding = tf.get_variable(
-                "field_embedding",
-                shape=[2, self.num_layer, 3*self.size],
-                dtype=tf.float32,
-                initializer=tf.initializers.variance_scaling(mode='fan_out'),
-                trainable=trainable,
-                collections=collections,
-                aggregation=tf.VariableAggregation.MEAN)
-
             batch_size = tf.shape(inputs)[0]
             input_dim = inputs.get_shape()[-1].value
             decoder_inputs = state[0]
-            encodes = state[1]
-            masks = state[2]
-            enc_dim = encodes.get_shape()[-1].value
-            assert(input_dim == enc_dim)
-            enc_length = tf.shape(encodes)[1]
+            field_embeds = state[1]
             to_squeeze = False
             if inputs.shape.ndims == 2:
                 to_squeeze = True
@@ -1548,22 +1534,13 @@ class AttentionCell(object):
             field_embeds_list = []
             posit_embeds_list = []
             token_embeds_list = []
-            # encodes part
-            posit_embeds = embed_position(
-                tf.tile(tf.expand_dims(tf.range(enc_length), 0), [batch_size, 1]),
-                int(self.size/4))
-            posit_embeds_list.append(posit_embeds)
-            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[0]]), [batch_size, enc_length, 1, 1])
-            field_embeds_list.append(field_embeds)
-            token_embeds_list.append(encodes)
 
             # decoder inputs part
             posit_embeds = embed_position(
                 tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1]),
                 int(self.size/4))
             posit_embeds_list.append(posit_embeds)
-            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[1]]), [batch_size, end_idx, 1, 1])
-            field_embeds_list.append(field_embeds)
+            field_embeds_list.append(tf.tile(tf.expand_dims(field_embeds, axis=1), [1, end_idx, 1, 1]))
             token_embeds_list.append(inputs)
 
             # decoder output part
@@ -1571,23 +1548,18 @@ class AttentionCell(object):
                 tf.tile(tf.expand_dims(tf.range(start_idx+1, end_idx+1), 0), [batch_size, 1]),
                 int(self.size/4))
             posit_embeds_list.append(posit_embeds)
-            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[1]]), [batch_size, length, 1, 1])
-            field_embeds_list.append(field_embeds)
-            token_embeds_list.append(tf.zeros([batch_size, length, enc_dim]))
+            field_embeds_list.append(tf.tile(tf.expand_dims(field_embeds, axis=1), [1, length, 1, 1]))
+            token_embeds_list.append(tf.zeros([batch_size, length, input_dim]))
 
             # prepare masks
             attn_masks = tf.concat(
                 [tf.sequence_mask(
-                     tf.tile(tf.expand_dims(tf.range(enc_length, enc_length+end_idx),0), [batch_size,1]),
-                     maxlen=enc_length+end_idx+length),
+                     tf.tile(tf.expand_dims(tf.range(0, end_idx),0), [batch_size,1]),
+                     maxlen=end_idx+length),
                  tf.sequence_mask(
-                     tf.tile(tf.expand_dims(tf.range(enc_length+start_idx, enc_length+end_idx)+1,0), [batch_size,1]),
-                     maxlen=enc_length+end_idx+length)],
+                     tf.tile(tf.expand_dims(tf.range(start_idx, end_idx)+1,0), [batch_size,1]),
+                     maxlen=end_idx+length)],
                 axis=1)
-            attn_masks = tf.logical_and(
-                attn_masks,
-                tf.expand_dims(tf.pad(masks, [[0,0],[0,end_idx+length]], constant_values=True), axis=1))
-            attn_masks = tf.pad(attn_masks, [[0,0],[enc_length, 0],[0,0]])
 
             outputs = transformer(
                 tf.concat(field_embeds_list, axis=1),
@@ -1599,7 +1571,7 @@ class AttentionCell(object):
                 dropout=self.dropout,
                 is_training=self.is_training,
                 scope="transformer")
-            outputs = outputs[:,enc_length+end_idx:,-1]
+            outputs = outputs[:,end_idx:,-1]
             outputs = fully_connected(
                 outputs,
                 self.size,
