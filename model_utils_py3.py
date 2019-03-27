@@ -326,20 +326,6 @@ def layer_norm(inputs,
         outputs = beta + gamma*outputs
     return outputs
 
-def params_decay(decay):
-    """ Add ops to decay weights and biases
-
-    """
-
-    params = tf.get_collection_ref(
-        tf.GraphKeys.WEIGHTS) + tf.get_collection_ref(tf.GraphKeys.BIASES)
-
-    while len(params) > 0:
-        p = params.pop()
-        tf.add_to_collection(
-            tf.GraphKeys.UPDATE_OPS,
-            p.assign(decay*p + (1-decay)*tf.truncated_normal(
-                tf.shape(p), stddev=0.01)))
 
 ### Optimize ###
 
@@ -367,14 +353,20 @@ def optimize_loss(loss,
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
     if wd > .0:
+        wd_optimizer = tf.train.GradientDescentOptimizer(learning_rate=wd)
+        wd_grad_var_list = []
         for i, grad_var in enumerate(grad_var_list):
             grad, var = grad_var
             if (grad == None) or (not var in candidates):
                 continue
-            grad_var_list[i] = (grad+wd*var, var)
-    train_op = optimizer.apply_gradients(
-        grad_var_list,
-        global_step=global_step)
+            wd_grad_var_list.append((var, var))
+        wd_op = wd_optimizer.apply_gradients(
+            wd_grad_var_list)
+        update_ops.append(wd_op)
+    with tf.control_dependencies(update_ops):
+        train_op = optimizer.apply_gradients(
+            grad_var_list,
+            global_step=global_step)
     return train_op
 
 ### Nets ###
@@ -1000,28 +992,10 @@ def attention_simple(querys,
         if size == None:
             size = values.get_shape()[-1].value
 
-        querys = fully_connected(
-            querys,
-            size,
-            dropout=dropout,
-            is_training=is_training,
-            scope="query_projs")
         querys = tf.stack(tf.split(querys, num_head, axis=-1), axis=1)
 
-        keys = fully_connected(
-            keys,
-            size,
-            dropout=dropout,
-            is_training=is_training,
-            scope="key_projs")
         keys = tf.stack(tf.split(keys, num_head, axis=-1), axis=1)
 
-        values = fully_connected(
-            values,
-            size,
-            dropout=dropout,
-            is_training=is_training,
-            scope="value_projs")
         values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
         
         logits = tf.matmul(querys, keys, transpose_b=True)
@@ -1335,11 +1309,12 @@ def translate_position_embeds(position_embeds, delta):
     new_position_embeds = tf.concat([new_cos, new_sin], axis=-1)
     return new_position_embeds
 
-def transformer(field_encodes,
+def transformer(field_embeds,
                 posit_embeds,
                 token_embeds,
                 num_layers,
                 layer_size,
+                extra_field_embeds=None,
                 extra_posit_embeds=None,
                 extra_encodes=None,
                 num_head=8,
@@ -1351,14 +1326,16 @@ def transformer(field_encodes,
     """Transformer encoder
        in the form of key-value
        args:
-           extra_encodes: batch_size x (num_layers+1) x extra_length x layer_size
+           field_embeds: batch_size x length x num_layers x 2*layer_size
+           posit_embeds: batch_size x length x layer_size
+           token_embeds: batch_size x length x layer_size
        return:
-           encodes: batch_size x (num_layers+1) x length x layer_size
+           encodes: batch_size x length x (num_layers+1) x layer_size
     """
 
     with tf.variable_scope(scope,
                            "Transformer",
-                           [field_encodes, posit_embeds, token_embeds],
+                           [field_embeds, posit_embeds, token_embeds],
                            reuse=reuse) as sc:
 
         trainable = (is_training != False)
@@ -1366,8 +1343,8 @@ def transformer(field_encodes,
         if trainable:
             collections.append(tf.GraphKeys.WEIGHTS)
 
-        batch_size = tf.shape(field_encodes)[0]
-        length = tf.shape(field_encodes)[1]
+        batch_size = tf.shape(token_embeds)[0]
+        length = tf.shape(token_embeds)[1]
         token_encodes = fully_connected(
             token_embeds,
             layer_size,
@@ -1381,42 +1358,73 @@ def transformer(field_encodes,
             masks = tf.ones([batch_size, length, length], dtype=tf.bool)
         masks = tf.logical_and(masks,
             tf.logical_not(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool)))
+        field_query_embeds, field_key_embeds, field_value_embeds = tf.split(field_embeds, 3, axis=-1)
+        field_query_embeds = tf.unstack(field_query_embeds, axis=2)
+        field_key_embeds = tf.unstack(field_key_embeds, axis=2)
+        field_value_embeds = tf.unstack(field_value_embeds, axis=2)
         if not extra_encodes is None:
-            extra_encodes_list = tf.unstack(extra_encodes, axis=1)
+            extra_encodes_list = tf.unstack(extra_encodes, axis=2)
+            extra_field_query_embeds, extra_field_key_embeds, extra_field_value_embeds = tf.split(extra_field_embeds, 3, axis=-1)
+            extra_field_key_embeds = tf.unstack(extra_field_key_embeds, axis=2)
+            extra_field_value_embeds = tf.unstack(extra_field_value_embeds, axis=2)
         encodes_list = []
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
                 encodes_normed = layer_norm(
-                    token_encodes+field_encodes, begin_norm_axis=-1, is_training=is_training)
+                    token_encodes, begin_norm_axis=-1, is_training=is_training)
                 encodes_list.append(encodes_normed)
                 querys = tf.concat([posit_embeds, encodes_normed], axis=-1)
                 keys = querys
                 values = encodes_normed
+                querys = fully_connected(
+                    querys,
+                    layer_size,
+                    dropout=dropout,
+                    is_training=is_training,
+                    scope="query_projs")
+                querys += field_query_embeds[i]
                 if not extra_encodes is None:
+                    field_key_embeds[i] = tf.concat([field_key_embeds[i], extra_field_key_embeds[i]], axis=1)
+                    field_value_embeds[i] = tf.concat([field_value_embeds[i], extra_field_value_embeds[i]], axis=1)
                     keys = tf.concat([keys, tf.concat([extra_posit_embeds, extra_encodes_list[i]], axis=-1)], axis=1)
                     values = tf.concat([values, extra_encodes_list[i]], axis=1)
-                token_encodes += attention_simple(querys, keys, values,
+                keys = fully_connected(
+                    keys,
+                    layer_size,
+                    dropout=dropout,
+                    is_training=is_training,
+                    scope="key_projs")
+                keys += field_key_embeds[i]
+                values = GLU(
+                    values,
+                    layer_size,
+                    dropout=dropout,
+                    is_training=is_training,
+                    scope="value_projs")
+                values += field_value_embeds[i]
+                attn_feat = attention_simple(querys, keys, values,
                     num_head=num_head, masks=masks, size=layer_size,
                     dropout=dropout, is_training=is_training)
+                token_encodes += attn_feat
                 encodes_normed = layer_norm(
-                    token_encodes+field_encodes, begin_norm_axis=-1, is_training=is_training)
+                    token_encodes, begin_norm_axis=-1, is_training=is_training)
                 token_encodes += MLP(
-                    tf.concat([token_embeds, encodes_normed], axis=-1),
+                    tf.concat([encodes_normed, attn_feat, token_embeds], axis=-1),
                     2,
-                    2*layer_size,
+                    layer_size,
                     layer_size,
                     activation_fn=tf.nn.relu,
                     dropout=dropout,
                     is_training=is_training)
         encodes_normed = layer_norm(
-            token_encodes+field_encodes, begin_norm_axis=-1, is_training=is_training)
+            token_encodes, begin_norm_axis=-1, is_training=is_training)
         encodes_list.append(encodes_normed)
-        encodes = tf.stack(encodes_list, axis=1)
+        encodes = tf.stack(encodes_list, axis=2)
     return encodes
 
 
 class CudnnLSTMCell(object):
-    """Wrapper of tf.contrib.cudnn_rnn.CudnnLSM"""
+    """Wrapper of tf.contrib.cudnn_rnn.CudnnLSTM"""
 
     def __init__(self,
                  num_layers,
@@ -1495,17 +1503,10 @@ class AttentionCell(object):
             trainable=(self.is_training != False)
             if trainable:
                 collections.append(tf.GraphKeys.WEIGHTS)
-            field_posit_embedding = tf.get_variable(
-                "field_posit_embedding",
-                shape=[2, int(self.size/4)],
-                dtype=tf.float32,
-                initializer=tf.initializers.variance_scaling(mode='fan_out'),
-                trainable=trainable,
-                collections=collections,
-                aggregation=tf.VariableAggregation.MEAN)
-            field_encode_embedding = tf.get_variable(
-                "field_encode_embedding",
-                shape=[2, self.size],
+
+            field_embedding = tf.get_variable(
+                "field_embedding",
+                shape=[2, self.num_layer, 3*self.size],
                 dtype=tf.float32,
                 initializer=tf.initializers.variance_scaling(mode='fan_out'),
                 trainable=trainable,
@@ -1544,37 +1545,34 @@ class AttentionCell(object):
             start_idx = tf.shape(decoder_inputs_tensor)[1] - length
             end_idx = tf.shape(decoder_inputs_tensor)[1]
 
-            field_encodes_list = []
+            field_embeds_list = []
             posit_embeds_list = []
             token_embeds_list = []
             # encodes part
             posit_embeds = embed_position(
                 tf.tile(tf.expand_dims(tf.range(enc_length), 0), [batch_size, 1]),
                 int(self.size/4))
-            posit_embeds += field_posit_embedding[0]
             posit_embeds_list.append(posit_embeds)
-            field_encodes = tf.tile(tf.nn.embedding_lookup(field_encode_embedding, [[0]]), [batch_size, enc_length, 1])
-            field_encodes_list.append(field_encodes)
+            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[0]]), [batch_size, enc_length, 1, 1])
+            field_embeds_list.append(field_embeds)
             token_embeds_list.append(encodes)
 
             # decoder inputs part
             posit_embeds = embed_position(
                 tf.tile(tf.expand_dims(tf.range(end_idx), 0), [batch_size, 1]),
                 int(self.size/4))
-            posit_embeds += field_posit_embedding[1]
             posit_embeds_list.append(posit_embeds)
-            field_encodes = tf.tile(tf.nn.embedding_lookup(field_encode_embedding, [[1]]), [batch_size, end_idx, 1])
-            field_encodes_list.append(field_encodes)
+            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[1]]), [batch_size, end_idx, 1, 1])
+            field_embeds_list.append(field_embeds)
             token_embeds_list.append(inputs)
 
             # decoder output part
             posit_embeds = embed_position(
                 tf.tile(tf.expand_dims(tf.range(start_idx+1, end_idx+1), 0), [batch_size, 1]),
                 int(self.size/4))
-            posit_embeds += field_posit_embedding[1]
             posit_embeds_list.append(posit_embeds)
-            field_encodes = tf.tile(tf.nn.embedding_lookup(field_encode_embedding, [[1]]), [batch_size, length, 1])
-            field_encodes_list.append(field_encodes)
+            field_embeds = tf.tile(tf.nn.embedding_lookup(field_embedding, [[1]]), [batch_size, length, 1, 1])
+            field_embeds_list.append(field_embeds)
             token_embeds_list.append(tf.zeros([batch_size, length, enc_dim]))
 
             # prepare masks
@@ -1592,7 +1590,7 @@ class AttentionCell(object):
             attn_masks = tf.pad(attn_masks, [[0,0],[enc_length, 0],[0,0]])
 
             outputs = transformer(
-                tf.concat(field_encodes_list, axis=1),
+                tf.concat(field_embeds_list, axis=1),
                 tf.concat(posit_embeds_list, axis=1),
                 tf.concat(token_embeds_list, axis=1),
                 self.num_layer,
@@ -1601,7 +1599,7 @@ class AttentionCell(object):
                 dropout=self.dropout,
                 is_training=self.is_training,
                 scope="transformer")
-            outputs = outputs[:,-1,enc_length+end_idx:]
+            outputs = outputs[:,enc_length+end_idx:,-1]
             outputs = fully_connected(
                 outputs,
                 self.size,
