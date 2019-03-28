@@ -353,7 +353,8 @@ def optimize_loss(loss,
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
     if wd > .0:
-        wd_optimizer = tf.train.GradientDescentOptimizer(learning_rate=wd)
+        wd_every = 10
+        wd_optimizer = tf.train.GradientDescentOptimizer(learning_rate=wd_every*wd)
         wd_grad_var_list = []
         for i, grad_var in enumerate(grad_var_list):
             grad, var = grad_var
@@ -362,6 +363,10 @@ def optimize_loss(loss,
             wd_grad_var_list.append((var, var))
         wd_op = wd_optimizer.apply_gradients(
             wd_grad_var_list)
+        wd_op = tf.cond(
+            tf.equal(tf.floormod(global_step, wd_every), 0),
+            lambda: wd_op,
+            lambda: tf.no_op())
         update_ops.append(wd_op)
     with tf.control_dependencies(update_ops):
         train_op = optimizer.apply_gradients(
