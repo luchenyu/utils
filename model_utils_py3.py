@@ -63,15 +63,15 @@ def fully_connected(inputs,
             initializer=tf.initializers.variance_scaling(mode='fan_in'),
             trainable=trainable,
             aggregation=tf.VariableAggregation.MEAN)
-        weights_norm = tf.get_variable(
-            'weights_norm',
-            shape=[num_outputs,],
-            dtype=dtype,
-            initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
-            collections=weights_collections,
-            trainable=trainable,
-            aggregation=tf.VariableAggregation.MEAN)
         if trainable and weight_normalize:
+            weights_norm = tf.get_variable(
+                'weights_norm',
+                shape=[num_outputs,],
+                dtype=dtype,
+                initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
+                collections=weights_collections,
+                trainable=trainable,
+                aggregation=tf.VariableAggregation.MEAN)
             norm_op = weights.assign(
                 tf.nn.l2_normalize(
                     weights, 0) * tf.exp(weights_norm))
@@ -170,15 +170,15 @@ def convolution2d(inputs,
                     initializer=tf.initializers.variance_scaling(mode='fan_in'),
                     trainable=trainable,
                     aggregation=tf.VariableAggregation.MEAN)
-                weights_norm = tf.get_variable(
-                    'weights_norm',
-                    shape=[output_size,],
-                    dtype=dtype,
-                    initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
-                    collections=weights_collections,
-                    trainable=trainable,
-                    aggregation=tf.VariableAggregation.MEAN)
                 if is_training != False and weight_normalize:
+                    weights_norm = tf.get_variable(
+                        'weights_norm',
+                        shape=[output_size,],
+                        dtype=dtype,
+                        initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
+                        collections=weights_collections,
+                        trainable=trainable,
+                        aggregation=tf.VariableAggregation.MEAN)
                     norm_op = weights.assign(
                         tf.nn.l2_normalize(
                             weights, 0) * tf.exp(weights_norm))
