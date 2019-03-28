@@ -979,7 +979,7 @@ class RANCell(tf.contrib.rnn.RNNCell):
 def attention_simple(querys,
                      keys,
                      values,
-                     num_head=1,
+                     num_heads=1,
                      size=None,
                      masks=None,
                      dropout=None,
@@ -1005,11 +1005,11 @@ def attention_simple(querys,
         if size == None:
             size = values.get_shape()[-1].value
 
-        querys = tf.stack(tf.split(querys, num_head, axis=-1), axis=1)
+        querys = tf.stack(tf.split(querys, num_heads, axis=-1), axis=1)
 
-        keys = tf.stack(tf.split(keys, num_head, axis=-1), axis=1)
+        keys = tf.stack(tf.split(keys, num_heads, axis=-1), axis=1)
 
-        values = tf.stack(tf.split(values, num_head, axis=-1), axis=1)
+        values = tf.stack(tf.split(values, num_heads, axis=-1), axis=1)
         
         logits = tf.matmul(querys, keys, transpose_b=True)
 
@@ -1330,7 +1330,7 @@ def transformer(field_embeds,
                 extra_field_embeds=None,
                 extra_posit_embeds=None,
                 extra_encodes=None,
-                num_head=8,
+                num_heads=8,
                 masks=None,
                 dropout=None,
                 is_training=True,
@@ -1416,7 +1416,7 @@ def transformer(field_embeds,
                     scope="value_projs")
                 values += field_value_embeds[i]
                 attn_feat = attention_simple(querys, keys, values,
-                    num_head=num_head, masks=masks, size=layer_size,
+                    num_heads=num_heads, masks=masks, size=layer_size,
                     dropout=dropout, is_training=is_training)
                 token_encodes += attn_feat
                 encodes_normed = layer_norm(
