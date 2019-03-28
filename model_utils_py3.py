@@ -98,10 +98,13 @@ def fully_connected(inputs,
             inputs = tf.reshape(inputs, [-1, num_input_units])
 
         if dropout != None:
-            inputs = tf.cond(
-                tf.cast(is_training, tf.bool),
-                lambda: tf.nn.dropout(inputs, rate=dropout),
-                lambda: inputs)
+            if is_training == True:
+                inputs = tf.nn.dropout(inputs, rate=dropout)
+            elif is_training != False:
+                inputs = tf.cond(
+                    tf.cast(is_training, tf.bool),
+                    lambda: tf.nn.dropout(inputs, rate=dropout),
+                    lambda: inputs)
 
         outputs = tf.matmul(inputs, weights) + biases
 
@@ -150,10 +153,13 @@ def convolution2d(inputs,
             kernel_sizes = [kernel_sizes]
         assert(len(output_sizes) == len(kernel_sizes))
         if dropout != None:
-            inputs = tf.cond(
-                tf.cast(is_training, tf.bool),
-                lambda: tf.nn.dropout(inputs, rate=dropout),
-                lambda: inputs)
+            if is_training == True:
+                inputs = tf.nn.dropout(inputs, rate=dropout)
+            elif is_training != False:
+                inputs = tf.cond(
+                    tf.cast(is_training, tf.bool),
+                    lambda: tf.nn.dropout(inputs, rate=dropout),
+                    lambda: inputs)
         output_list = []
         for i in range(len(output_sizes)):
             with tf.variable_scope("conv"+str(i)):
@@ -455,13 +461,15 @@ def MLP(inputs,
                            [inputs],
                            reuse=reuse) as sc:
         size = inputs.get_shape()[-1].value
-        if dropout == None:
-            outputs = inputs
-        else:
-            outputs = tf.cond(
-                tf.cast(is_training, tf.bool),
-                lambda: tf.nn.dropout(inputs, rate=dropout),
-                lambda: inputs)
+        if dropout != None:
+            if is_training == True:
+                inputs = tf.nn.dropout(inputs, rate=dropout)
+            elif is_training != False:
+                inputs = tf.cond(
+                    tf.cast(is_training, tf.bool),
+                    lambda: tf.nn.dropout(inputs, rate=dropout),
+                    lambda: inputs)
+        outputs = inputs
 
         # residual layers
         for i in range(num_layers-1):
