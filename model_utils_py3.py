@@ -2399,9 +2399,27 @@ def stitch_chars(segmented_seqs):
         swap_memory=True)
     return seqs
 
-def unique_2d(x):
+def match_vector(x, y):
     """
-    x: num_vectors x vector_dim
+    args:
+        x: batch_size x length1 x dim or length1 x dim
+        y: batch_size x length2 x dim or length2 x dim
+    return:
+        match_matrix: batch_size x length1 x length2 or lengh1 x length2, bool
+    """
+    match_matrix = tf.equal(
+        tf.expand_dims(x, axis=-2),
+        tf.expand_dims(y, axis=-3))
+    match_matrix = tf.reduce_all(match_matrix, axis=-1)
+    return match_matrix
+
+def unique_vector(x):
+    """
+    args:
+        x: num_vectors x vector_dim
+    returns:
+        unique elems of x
+        indices in x of the unique elems
     """
     x_shape=tf.shape(x) #(3,2)
     x1=tf.tile(x,[1,x_shape[0]]) #[[1,2],[1,2],[1,2],[3,4],[3,4],[3,4]..]
