@@ -43,17 +43,16 @@ class AtomicVocab(Vocab):
         if atomize_method != None:
             self.atomize_method = atomize_method
         else:
+            _sep_ = re.compile(r'\s+')
             def _atomize_method(molecule):
                 if molecule == '':
                     toks = []
+                elif molecule in self.token2id:
+                    toks = [molecule]
+                elif not re.fullmatch(_sep_, molecule) is None:
+                    toks = [self.sep]
                 else:
-                    molecule = molecule.strip()
-                    if molecule == '':
-                        toks = [self.sep]
-                    elif molecule in self.token2id:
-                        toks = [molecule]
-                    else:
-                        toks = list(molecule)
+                    toks = list(molecule)
                 return toks
             self.atomize_method = _atomize_method
         if rev_atomize_method != None:
