@@ -9,118 +9,140 @@ WORD2VEC = None
 __location__ = os.path.realpath(
         os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
-class Vocab(object):
-    def __init__(self, filename, init=None, cutoff=None, embedding_files=None):
-        self.filename = filename
-        self.reserved_vocab_list = []
-        self.vocab_list = []
-        self.vocab_dict = {}
-        if os.path.exists(filename):
-            for line in open(filename, 'r'):
-                [key, count] = line.strip("\n").split("\t")
-                if int(count) < 0:
-                    self.reserved_vocab_list.append(key)
-                self.vocab_list.append(key)
-                self.vocab_dict[key] = [len(self.vocab_dict), int(count)]
-        elif init != None:
-            for item in init:
-                self.reserved_vocab_list.append(item)
-                self.vocab_list.append(item)
-                self.vocab_dict[item] = [len(self.vocab_dict), -1]
-        self.changed = False
-        self.cutoff = cutoff if cutoff else sys.maxsize
+class Vocab(gensim.corpora.Dictionary):
+    """
+    General vocab based on gensim Dictionary
+    """
+    def __init__(self, filename=None, special_token_dict=None):
+        gensim.corpora.Dictionary.__init__(self)
+        self.special_token_dict = special_token_dict
+        if special_token_dict != None:
+            self.token2id.update(special_token_dict)
+            self.patch_with_special_tokens(special_token_dict)
+        if filename != None:
+            other = gensim.corpora.Dictionary.load_from_text(filename)
+            self.merge_with(other)
+
+    def idx2doc(self, idxs, unknown_word=''):
+        doc = [self.get(i, default=unknown_word) for i in idxs]
+        return doc
+
+class AtomicVocab(Vocab):
+    """
+    Typically vocab of characters
+    with special tokens [<PAD>, <SEP>, <UNK>] at the beginning
+    """
+    def __init__(self, filename=None, special_tokens=[],
+                 atomize_method=None, rev_atomize_method=None,
+                 embedding_files=None):
+        self.pad, self.sep, self.unk = '<PAD>', '<SEP>', '<UNK>'
+        special_token_dict = {self.pad: 0, self.sep: 1, self.unk: 2}
+        for i, tok in enumerate(special_tokens):
+            special_token_dict[tok] = i+3
+        Vocab.__init__(self, filename, special_token_dict)
+        if atomize_method != None:
+            self.atomize_method = atomize_method
+        else:
+            def _atomize_method(molecule):
+                if molecule == '':
+                    toks = []
+                else:
+                    molecule = molecule.strip()
+                    if molecule == '':
+                        toks = [self.sep]
+                    elif molecule in self.token2id:
+                        toks = [molecule]
+                    else:
+                        toks = list(molecule)
+                return toks
+            self.atomize_method = _atomize_method
+        if rev_atomize_method != None:
+            self.rev_atomize_method = rev_atomize_method
+        else:
+            _map_ = {self.pad: '', self.sep: '\n', self.unk: '*'}
+            def _rev_atomize_method(toks):
+                toks = [_map_[tok] if tok in _map_ else tok for tok in toks]
+                molecule = ''.join(toks)
+                return molecule
+            self.rev_atomize_method = _rev_atomize_method
+        self.embedding_init = None
         if embedding_files != None:
-            word2vecs = []
-            w2v_sizes = []
-            for path in embedding_files.split(','):
-                word2vecs.append(FastWord2vec(path))
-                w2v_sizes.append(word2vecs[-1].syn0.shape[1])
-            self.embedding_init = np.random.normal(0.0, 0.01, (self.size(), sum(w2v_sizes)))
-            for idx, word in enumerate(self.vocab_list[:self.size()]):
-                ptr = 0
-                for i, word2vec in enumerate(word2vecs):
-                    try:
-                        hit = word2vec[word]
-                        self.embedding_init[idx, ptr:ptr+w2v_sizes[i]] = hit
-                    except:
-                        pass
-                    finally:
-                        ptr += w2v_sizes[i]
+            self.load_embeddings(embedding_files)
+
+    def load_embeddings(self, embedding_files):
+        """
+        load embeddings from files
+        """
+        word2vecs = []
+        w2v_sizes = []
+        for path in embedding_files.split(','):
+            word2vecs.append(FastWord2vec(path))
+            w2v_sizes.append(word2vecs[-1].syn0.shape[1])
+        self.embedding_init = np.random.normal(0.0, 0.01, (len(self), sum(w2v_sizes)))
+        for word, idx in self.token2id.items():
+            ptr = 0
+            for i, word2vec in enumerate(word2vecs):
+                try:
+                    hit = word2vec[word]
+                    self.embedding_init[idx, ptr:ptr+w2v_sizes[i]] = hit
+                except:
+                    pass
+                finally:
+                    ptr += w2v_sizes[i]
+
+    def doc2idx(self, document):
+        return Vocab.doc2idx(self, document, unknown_word_index=self.token2id[self.unk])
+
+    def idx2doc(self, idxs):
+        return Vocab.idx2doc(self, idxs, unknown_word=self.unk)
+
+    def molecule2idx(self, molecule):
+        return self.doc2idx(self.atomize_method(molecule))
+
+    def idx2molecule(self, idxs):
+        return self.rev_atomize_method(self.idx2doc(idxs))
+
+class MolecularVocab(Vocab):
+    """
+    Typically vocab of words
+    with special tokens [<PAD>] and optional [<SEP>, <UNK>] at the beginning
+    """
+    def __init__(self, atomic_vocab, filename=None, special_tokens=[],
+                 has_sep=False, has_unk=False):
+        self.atomic_vocab = atomic_vocab
+        self.pad, self.sep, self.unk = '<PAD>', None, None
+        if has_unk:
+            self.unk = '<UNK>'
+            special_tokens = [self.unk]+special_tokens
+        if has_sep:
+            self.sep = '<SEP>'
+            special_tokens = [self.sep]+special_tokens
+        special_token_dict = {self.pad: 0}
+        for i, tok in enumerate(special_tokens):
+            special_token_dict[tok] = i+1
+        Vocab.__init__(self, filename, special_token_dict)
+        self.decompose_table = None
+        self.update_decompose_table()
+
+    def update_decompose_table(self):
+        """
+        decompose_table is a list of same-length lists of ids, each list is a tok
+        """
+        atomic_ids = [self.atomic_vocab.doc2idx([tok]) \
+                      if tok in self.special_token_dict else \
+                      self.atomic_vocab.molecule2idx(tok) \
+                      for tok in self.values()]
+        max_length = max([len(i) for i in atomic_ids])
+        self.decompose_table = [i+[0]*(max_length-len(i)) for i in atomic_ids]
+
+    def doc2idx(self, document):
+        if self.unk is None:
+            return Vocab.doc2idx(self, document, unknown_word_index=None)
         else:
-            self.embedding_init = None
+            return Vocab.doc2idx(self, document, unknown_word_index=self.token2id[self.unk])
 
-    def idx2key(self, idx):
-        """given index return key, 1-based"""
-        idx -= 1
-        if idx >= min(self.cutoff, len(self.vocab_list)):
-            return None
-        else:
-            return self.vocab_list[idx]
-
-    def key2idx(self, key):
-        """given key return index, 1-based"""
-        value = self.vocab_dict.get(key)
-        if value:
-            if value[0] < self.cutoff:
-                return value[0]+1
-            else:
-                return None
-        else:
-            return None
-
-    def key2count(self, key):
-        """given key return count"""
-        value = self.vocab_dict.get(key)
-        if value:
-            if value[0] < self.cutoff:
-                return value[1]
-            else:
-                return 0
-        else:
-            return 0
-
-    def size(self):
-        """return size of the vocab"""
-        return min(self.cutoff, len(self.vocab_list))
-
-    def dump(self):
-        """dump the vocab to the file"""
-        if self.changed:
-            with open(self.filename, 'w') as f:
-                for key in self.vocab_list:
-                    f.write(key+'\t'+str(self.vocab_dict[key][1])+'\n')
-
-    def update(self, patch):
-        """update the vocab"""
-        self.changed = True
-        for key in patch:
-            if self.vocab_dict.has_key(key):
-                if self.vocab_dict[key][1] >= 0:
-                    self.vocab_dict[key][1] += patch[key]
-            else:
-                self.vocab_dict[key] = [len(self.vocab_dict), patch[key]]
-        self.vocab_list = self.reserved_vocab_list + sorted(
-            filter(lambda i: self.vocab_dict[i][1] >= 0, self.vocab_dict),
-            key=lambda i: self.vocab_dict[i][1],
-            reverse=True)
-        for idx, item in enumerate(self.vocab_list):
-            self.vocab_dict[item][0] = idx
-
-
-class Dict(object):
-    def __init__(self, filename):
-        self.filename = filename
-        self._dict = {}
-        if os.path.exists(filename):
-            for line in open(filename, 'r'):
-                key, values = line.strip().split('\t')
-                self._dict[key] = values
-    def lookup(self, key):
-        value = self._dict.get(key)
-        if value:
-            return value
-        else:
-            return None
+    def idx2doc(self, idxs):
+        return Vocab.idx2doc(self, idxs, unknown_word=self.unk)
 
 class FastWord2vec(object):
     """
@@ -282,37 +304,13 @@ class Synonyms(object):
         return results
 
 def normalize(text):
+    """
+    1. unicodedata normalize
+    2. traditional chinese to simplified chinese
+    """
     text = unicodedata.normalize('NFKC', text)
     text = HanziConv.toSimplified(text)
     return text
-
-def tokens_to_token_ids(tokens, vocab):
-    """encode a sentence in plain text into a sequence of token ids, 1-based
-    args:
-        tokens: list of tokens
-        vocab: vocab of tokens
-    return:
-        token_id_list: list of token_id
-    """
-    if not type(tokens) is list:
-        tokens = list(tokens)
-    token_id_list = [vocab.key2idx(token) for token in tokens]
-    token_id_list = [idx if idx!=None else vocab.key2idx("_UNK") for idx in token_id_list]
-    return token_id_list
-
-def tokens_to_char_ids(tokens, char_vocab):
-    """
-    tokens to character ids, 1-based
-    args:
-        tokens: list of tokens
-        char_vocab: vocab of characters
-    return:
-        char_ids_list: list of char_ids
-    """
-    char_ids_list = [tokens_to_token_ids(i, char_vocab) for i in tokens]
-    max_token_length = max([len(i) for i in char_ids_list])
-    char_ids_list = [i+[0]*(max_token_length-len(i)) for i in char_ids_list]
-    return char_ids_list
 
 def tokens_to_seqs_segs(tokens, char_vocab):
     """
@@ -326,9 +324,9 @@ def tokens_to_seqs_segs(tokens, char_vocab):
     """
 
     def _process(token):
-        char_ids = tokens_to_token_ids(token, char_vocab)
+        char_ids = char_vocab.molecule2idx(token)
         if len(char_ids) > 30:
-            char_ids = [char_vocab.key2idx("_UNK")]
+            char_ids = [char_vocab.token2id(char_vocab.unk)]
         if len(char_ids) == 0:
             return ([], [])
         else:
