@@ -326,7 +326,7 @@ def tokens_to_seqs_segs(tokens, char_vocab):
     def _process(token):
         char_ids = char_vocab.molecule2idx(token)
         if len(char_ids) > 30:
-            char_ids = [char_vocab.token2id(char_vocab.unk)]
+            char_ids = [char_vocab.token2id[char_vocab.unk]]
         if len(char_ids) == 0:
             return ([], [])
         else:
