@@ -2295,22 +2295,22 @@ def slice_words(seqs, segs, get_idxs=False, encodes=None):
     padded_seg_masks2 = tf.logical_xor(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
     padded_segs = tf.logical_or(padded_segs, padded_seg_masks2)
 
-    num_words = tf.reduce_sum(tf.cast(padded_segs, tf.int32), axis=1)-1
+    num_words = tf.maximum(
+        tf.reduce_sum(tf.cast(padded_segs, tf.int32), axis=1)-1, 0)
     max_num_word = tf.maximum(tf.reduce_max(num_words), 1)
+    idx = tf.range(max_length+1, dtype=tf.int32)
 
-    def get_idx(padded_seg):
-        idx = tf.range(max_length+1, dtype=tf.int32)
-        idx = tf.boolean_mask(idx, padded_seg)
-        num = tf.shape(idx)[0]-1
-        start = tf.pad(idx[:-1], [[0,max_num_word-num]])
-        start = tf.reshape(start, [max_num_word])
-        length = tf.pad(idx[1:] - idx[:-1], [[0,max_num_word-num]])
-        length = tf.reshape(length, [max_num_word])
+    def get_idx(args):
+        padded_seg, num_word = args
+        valid_idx = tf.boolean_mask(idx, padded_seg)
+        pad_num = max_num_word-num_word
+        start = tf.pad(valid_idx[:-1], [[0, pad_num]])
+        length = tf.pad(valid_idx[1:] - valid_idx[:-1], [[0, pad_num]])
         return start, length
 
     starts, lengths = tf.map_fn(
         get_idx,
-        padded_segs,
+        (padded_segs, num_words),
         (tf.int32, tf.int32),
         parallel_iterations=128,
         back_prop=False,
