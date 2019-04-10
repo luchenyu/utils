@@ -311,9 +311,31 @@ def normalize(text):
     text = HanziConv.toSimplified(text)
     return text
 
+def tokens_to_seqs(tokens, word_vocab):
+    """
+    Turn list of tokens into seqs of word_ids
+    """
+    sep = re.compile(r'\s+')
+    tokens = [word_vocab.sep if not re.fullmatch(sep, word) is None else word for word in tokens]
+    seqs = word_vocab.doc2idx(tokens)
+    return seqs
+
+def seqs_to_tokens(seqs, word_vocab):
+    """
+    Turn seqs of word_ids to list of tokens
+    """
+    pad_id = word_vocab.token2id[word_vocab.pad]
+    seqs = list(filter(lambda i: i != pad_id, seqs))
+    tokens = word_vocab.idx2doc(seqs)
+    if word_vocab.sep != None:
+        tokens = ['\n' if tok == word_vocab.sep else tok for tok in tokens]
+    if word_vocab.unk != None:
+        tokens = ['*' if tok == word_vocab.unk else tok for tok in tokens]
+    return tokens
+
 def tokens_to_seqs_segs(tokens, char_vocab):
     """
-    Turn outputs of posseg into two seq of ids, 1-based
+    Turn list of tokens into seqs and segs
     args:
         tokens: list of tokens
         char_vocab: vocab of characters
@@ -337,3 +359,27 @@ def tokens_to_seqs_segs(tokens, char_vocab):
     if len(segs) > 0:
         segs.append(1.0)
     return seqs, segs
+
+def seqs_segs_to_tokens(seqs, segs, char_vocab):
+    """
+    Turn seqs and segs to list of tokens
+    args:
+        seqs: list of char_ids
+        segs: list of 1/0 segment flags
+        char_vocab: vocab of characters
+    return:
+        tokens: list of tokens
+    """
+    tokens = []
+    char_ids = [seqs[0]]
+    for i, seg in enumerate(segs[1:-1]):
+        if seg != 0.0:
+            tok = char_vocab.idx2molecule(char_ids)
+            if tok != '':
+                tokens.append(tok)
+            char_ids = []
+        char_ids.append(seqs[i+1])
+    tok = char_vocab.idx2molecule(char_ids)
+    if tok != '':
+        tokens.append(tok)
+    return tokens

@@ -1841,7 +1841,7 @@ def greedy_dec(length,
                initial_state,
                cell,
                candidates_callback,
-               shared_candidateds,
+               shared_candidates,
                gamma=0.65):
     """ A greedy decoder.
     args:
@@ -1913,7 +1913,7 @@ def greedy_dec(length,
         return inputs, state, paths, scores, closed_paths, closed_scores
 
     for i in range(length):
-        inputs, state, seqs, scores, closed = body(inputs, state, seqs, scores, closed)
+        inputs, state, paths, scores, closed_paths, closed_scores = body(inputs, state, paths, scores, closed_paths, closed_scores)
 
     best_ids = tf.argmax(closed_scores, 1, output_type=tf.int32)
     best_ids = tf.stack([tf.range(batch_size, dtype=tf.int32), best_ids], axis=1)
