@@ -14,6 +14,7 @@
 # ==============================================================================
 import numpy as np
 import math
+from collections import namedtuple
 import tensorflow as tf
 from tensorflow.python.util import nest
 
@@ -1322,10 +1323,23 @@ def translate_position_embeds(position_embeds, delta):
     new_position_embeds = tf.concat([new_cos, new_sin], axis=-1)
     return new_position_embeds
 
-def transformer(features,
+TransformerStruct = namedtuple('TransformerStruct', [
+    'field_query_embeds',
+    'field_key_embeds',
+    'field_value_embeds',
+    'posit_embeds',
+    'token_embeds',
+    'masks',
+    'querys',
+    'keys',
+    'values',
+    'encodes']
+)
+
+def transformer(tfstruct,
                 num_layers,
                 layer_size,
-                extra_features=None,
+                extra_tfstruct=None,
                 num_heads=8,
                 attn_masks=None,
                 dropout=None,
@@ -1335,7 +1349,7 @@ def transformer(features,
     """Transformer encoder
        in the form of key-value
        args:
-           features: {
+           tfstruct: {
                'field_query_embeds': batch_size x length x num_layers*layer_size,
                'field_key_embeds': batch_size x length x num_layers*layer_size,
                'field_value_embeds': batch_size x length x num_layers*layer_size,
@@ -1349,25 +1363,25 @@ def transformer(features,
            }
            num_layers: int
            layer_size: int
-           extra_features: same structure, already encoded
+           extra_tfstruct: same structure, already encoded
            num_heads: int
            attn_masks: batch_size x length x (length+extra_length)
        return:
-           features: same features with missing slots filled
+           tfstruct: input tfstruct with missing slots filled
     """
 
     with tf.variable_scope(scope,
                            "Transformer",
-                           [features[key] for key in features] if extra_features is None else [features[key] for key in features] + [extra_features[key] for key in extra_features],
+                           [item for item in tfstruct] if extra_tfstruct is None else [item for item in tfstruct] + [item for item in extra_tfstruct],
                            reuse=reuse) as sc:
 
-        batch_size = tf.shape(features['token_embeds'])[0]
-        length = tf.shape(features['token_embeds'])[1]
+        batch_size = tf.shape(tfstruct.token_embeds)[0]
+        length = tf.shape(tfstruct.token_embeds)[1]
         extra_length = 0
-        if not extra_features is None:
-            extra_length = tf.shape(extra_features['token_embeds'])[1]
+        if not extra_tfstruct is None:
+            extra_length = tf.shape(extra_tfstruct.token_embeds)[1]
         token_encodes = fully_connected(
-            features['token_embeds'],
+            tfstruct.token_embeds,
             layer_size,
             dropout=dropout,
             is_training=is_training,
@@ -1377,21 +1391,21 @@ def transformer(features,
         attn_masks = tf.logical_and(attn_masks,
             tf.logical_not(tf.pad(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool), [[0,0],[0,0],[0,extra_length]])))
 
-        field_query_embeds = tf.split(features['field_query_embeds'], num_layers, axis=-1)
-        field_key_embeds = tf.split(features['field_key_embeds'], num_layers, axis=-1)
-        field_value_embeds = tf.split(features['field_value_embeds'], num_layers, axis=-1)
-        if not extra_features is None:
-            extra_field_key_embeds = tf.split(extra_features['field_key_embeds'], num_layers, axis=-1)
-            extra_field_value_embeds = tf.split(extra_features['field_value_embeds'], num_layers, axis=-1)
-            extra_keys = tf.split(extra_features['keys'], num_layers, axis=-1)
-            extra_values = tf.split(extra_features['values'], num_layers, axis=-1)
+        field_query_embeds = tf.split(tfstruct.field_query_embeds, num_layers, axis=-1)
+        field_key_embeds = tf.split(tfstruct.field_key_embeds, num_layers, axis=-1)
+        field_value_embeds = tf.split(tfstruct.field_value_embeds, num_layers, axis=-1)
+        if not extra_tfstruct is None:
+            extra_field_key_embeds = tf.split(extra_tfstruct.field_key_embeds, num_layers, axis=-1)
+            extra_field_value_embeds = tf.split(extra_tfstruct.field_value_embeds, num_layers, axis=-1)
+            extra_keys = tf.split(extra_tfstruct.keys, num_layers, axis=-1)
+            extra_values = tf.split(extra_tfstruct.values, num_layers, axis=-1)
         query_list, key_list, value_list = [], [], []
 
         for i in range(num_layers):
             with tf.variable_scope("layer"+str(i)):
                 encodes_normed = layer_norm(
                     token_encodes, begin_norm_axis=-1, is_training=is_training)
-                querys = tf.concat([features['posit_embeds'], encodes_normed], axis=-1)
+                querys = tf.concat([tfstruct.posit_embeds, encodes_normed], axis=-1)
                 keys = querys
                 values = encodes_normed
                 querys = fully_connected(
@@ -1418,7 +1432,7 @@ def transformer(features,
                     scope="value_projs")
                 value_list.append(values)
                 values += field_value_embeds[i]
-                if not extra_features is None:
+                if not extra_tfstruct is None:
                     keys = tf.concat([keys, extra_keys[i] + extra_field_key_embeds[i]], axis=1)
                     values = tf.concat([values, extra_values[i] + extra_field_value_embeds[i]], axis=1)
                 attn_feat = attention_simple(querys, keys, values,
@@ -1428,7 +1442,7 @@ def transformer(features,
                 encodes_normed = layer_norm(
                     token_encodes, begin_norm_axis=-1, is_training=is_training)
                 token_encodes += MLP(
-                    tf.concat([encodes_normed, attn_feat, features['token_embeds']], axis=-1),
+                    tf.concat([encodes_normed, attn_feat, tfstruct.token_embeds], axis=-1),
                     2,
                     layer_size,
                     layer_size,
@@ -1437,15 +1451,23 @@ def transformer(features,
                     is_training=is_training)
         encodes_normed = layer_norm(
             token_encodes, begin_norm_axis=-1, is_training=is_training)
-        features['querys'] = tf.concat(query_list, axis=-1)
-        features['keys'] = tf.concat(key_list, axis=-1)
-        features['values'] = tf.concat(value_list, axis=-1)
-        features['encodes'] = encodes_normed
-    return features
+        tfstruct = TransformerStruct(
+            field_query_embeds=tfstruct.field_query_embeds,
+            field_key_embeds=tfstruct.field_key_embeds,
+            field_value_embeds=tfstruct.field_value_embeds,
+            posit_embeds=tfstruct.posit_embeds,
+            token_embeds=tfstruct.token_embeds,
+            masks=tfstruct.masks,
+            querys=tf.concat(query_list, axis=-1),
+            keys=tf.concat(key_list, axis=-1),
+            values=tf.concat(value_list, axis=-1),
+            encodes=encodes_normed,
+        )
+    return tfstruct
 
-def concat_features(feature_list):
+def concat_tfstructs(tfstruct_list):
     """
-    concat list of features: {
+    concat list of tfstructs: {
        'field_query_embeds': batch_size x length x num_layers*layer_size,
        'field_key_embeds': batch_size x length x num_layers*layer_size,
        'field_value_embeds': batch_size x length x num_layers*layer_size,
@@ -1457,17 +1479,27 @@ def concat_features(feature_list):
        'values': batch_size x length x num_layers*layer_size,
        'encodes': batch_size x length x layer_size
     }
-    return: concat feature
+    return: concat tfstructs
     """
-    features = {}
-    feature_list = filter(lambda f: f != None, feature_list)
-    for key in feature_list[0]:
-        features[key] = tf.concat([f[key] for f in feature_list], axis=1)
-    return features
+    tfstruct_list = list(filter(lambda f: f != None, tfstruct_list))
+    if len(tfstruct_list) == 0:
+        return None
+    elif len(tfstruct_list) == 1:
+        return tfstruct_list[0]
+    else:
+        items = []
+        for i in range(len(tfstruct_list[0])):
+            feats = [f[i] for f in tfstruct_list]
+            if feats[0] is None:
+                items.append(None)
+            else:
+                items.append(tf.concat(feats, axis=1))
+        tfstruct = TransformerStruct(*items)
+        return tfstruct
 
-def split_features(features, num_or_size_splits):
+def split_tfstructs(tfstruct, num_or_size_splits):
     """
-    features: {
+    tfstruct: {
        'field_query_embeds': batch_size x length x num_layers*layer_size,
        'field_key_embeds': batch_size x length x num_layers*layer_size,
        'field_value_embeds': batch_size x length x num_layers*layer_size,
@@ -1479,15 +1511,26 @@ def split_features(features, num_or_size_splits):
        'values': batch_size x length x num_layers*layer_size,
        'encodes': batch_size x length x layer_size
     }
-    return: list of features
+    return: list of tfstructs
     """
-    feature_list = []
-    for key in features:
-        for i, split in enumerate(tf.split(features[key], num_or_size_splits, axis=1)):
-            if len(feature_list) < i+1:
-                feature_list.append({})
-            feature_list[i][key] = split
-    return feature_list
+    num_splits = len(num_or_size_splits) if type(num_or_size_splits) == list else num_or_size_splits
+    if tfstruct is None:
+        return []
+    elif num_splits == 1:
+        return [tfstruct]
+    else:
+        tfstruct_list = []
+        items_list = []
+        for i in range(len(tfstruct)):
+            if tfstruct[i] is None:
+                items_list.append(tuple([None]*num_splits))
+            else:
+                items_list.append(
+                    tuple(tf.split(tfstruct[i], num_or_size_splits, axis=1)))
+        items_list = list(zip(*items_list))
+        for items in items_list:
+            tfstruct_list.append(TransformerStruct(*items))
+        return tfstruct_list
 
 class CudnnLSTMCell(object):
     """Wrapper of tf.contrib.cudnn_rnn.CudnnLSTM"""
@@ -1796,41 +1839,88 @@ def gather_state(state, beam_parent):
 
 def greedy_dec(length,
                initial_state,
-               input_embedding,
                cell,
-               logit_fn):
+               candidates_callback,
+               shared_candidateds,
+               gamma=0.65):
     """ A greedy decoder.
-
+    args:
+        length: int
+        initial_state:
+        cell:
+        candidates_callback:
+            when pass None, return SEP embeds and ids
+            args:
+                encodes: batch_size x output_dim
+            return:
+                candidate_embeds: [batch_size x ]num_candidates x input_dim
+                candidate_ids: [batch_size x ]num_candidates [x word_len]
+                candidate_masks: [batch_size x ]num_candidates
+                logits: batch_size x num_candidates
+        shared_candidates: bool
     """
 
     batch_size = tf.shape(initial_state[0])[0] \
         if isinstance(initial_state, tuple) else \
         tf.shape(initial_state)[0]
-    inputs_size = input_embedding.get_shape()[1].value
-    inputs = tf.nn.embedding_lookup(
-        input_embedding, tf.zeros([batch_size], dtype=tf.int32))
+    start_embedding, start_id, _, _ = candidates_callback(None)
+    inputs = tf.tile(start_embedding, [batch_size, 1])
+    state = initial_state
+    if len(start_id.get_shape()) == 1:
+        paths = tf.zeros([batch_size, 0], dtype=tf.int32)
+        closed_paths = tf.zeros([batch_size, 0, length], dtype=tf.int32)
+    elif len(start_id.get_shape()) == 2:
+        paths = tf.zeros([batch_size, 0, tf.shape(start_id)[1]], dtype=tf.int32)
+        closed_paths = tf.zeros([batch_size, 0, length, tf.shape(start_id)[1]], dtype=tf.int32)
+    scores = tf.zeros([batch_size])
+    closed_scores = tf.zeros([batch_size, 0])
 
-    outputs, state = cell(inputs, initial_state)
-    logits = logit_fn(outputs)
+    def cond(inputs, state, paths, scores, closed_paths, closed_scores):
+        return tf.less(tf.shape(paths)[1], length)
 
-    symbol = tf.argmax(logits, 1)
-    seq = [symbol]
-    mask = tf.not_equal(symbol, 0)
-    tf.get_variable_scope().reuse_variables()
-    for _ in range(length-1):
-
-        inputs = tf.nn.embedding_lookup(input_embedding, symbol)
-
+    def body(inputs, state, paths, scores, closed_paths, closed_scores):
+        """
+        args:
+            inputs: batch_size x input_dim
+            state:
+            paths: batch_size x current_length [x word_len]
+            scores: batch_size
+            closed_paths: batch_size x current_length x length [x word_len]
+            closed_scores: batch_size x current_length
+        """
+        cur_len = tf.shape(paths)[1]
         outputs, state = cell(inputs, state)
-        logits = logit_fn(outputs)
+        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
+        log_probs = tf.nn.log_softmax(logits)
+        close_scores = (log_probs[:,0] + scores) / tf.pow((tf.cast(cur_len, tf.float32)+1e-12), gamma)
+        closed_scores = tf.concat([closed_scores, tf.expand_dims(close_scores, axis=1)], axis=1)
+        if len(paths.get_shape()) == 2:
+            close_paths = tf.pad(paths, [[0,0],[0,length-cur_len]])
+        elif len(paths.get_shape()) == 3:
+            close_paths = tf.pad(paths, [[0,0],[0,length-cur_len],[0,0]])
+        closed_paths = tf.concat([closed_paths, tf.expand_dims(close_paths, axis=1)], axis=1)
+        open_scores = log_probs[:, 1:]
+        indices = tf.argmax(open_scores, 1, output_type=tf.int32)
+        batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
+        if shared_candidates:
+            new_ids = tf.expand_dims(tf.gather(candidate_ids[1:], indices), axis=1)
+            inputs = tf.gather(candidate_embeds[1:], indices)
+        else:
+            new_ids = tf.expand_dims(tf.gather_nd(candidate_ids[:,1:], batch_indices), axis=1)
+            inputs = tf.gather_nd(candidate_embeds[:,1:], batch_indices)
+        paths = tf.concat([paths, new_ids], axis=1)
+        scores += tf.gather_nd(open_scores, batch_indices)
+        return inputs, state, paths, scores, closed_paths, closed_scores
 
-        symbol = tf.argmax(logits, 1)
-        symbol = tf.where(mask, symbol, tf.zeros([batch_size], dtype=tf.int64))
-        mask = tf.not_equal(symbol, 0)
+    for i in range(length):
+        inputs, state, seqs, scores, closed = body(inputs, state, seqs, scores, closed)
 
-        seq.append(symbol)
+    best_ids = tf.argmax(closed_scores, 1, output_type=tf.int32)
+    best_ids = tf.stack([tf.range(batch_size, dtype=tf.int32), best_ids], axis=1)
+    best_paths = tf.expand_dims(tf.gather_nd(closed_paths, best_ids), axis=1)
+    best_scores = tf.expand_dims(tf.gather_nd(closed_scores, best_ids), axis=1)
 
-    return tf.expand_dims(tf.stack(seq, 1), 1)
+    return best_paths, best_scores
 
 def stochastic_dec(length,
                    initial_state,
@@ -2362,16 +2452,21 @@ def stitch_chars(segmented_seqs):
             mask)
         num_char = tf.shape(seq)[0]
         seq = tf.pad(seq, [[0,max_num_char-num_char]])
-        return seq
 
-    seqs = tf.map_fn(
+        word_len = tf.reduce_sum(tf.cast(mask, tf.int32), axis=-1)
+        seg_pos, _ = tf.unique(tf.math.cumsum(word_len) - 1)
+        seg = tf.reduce_sum(tf.one_hot(seg_pos, max_num_char), axis=0)
+        return seq, seg
+
+    seqs, segs = tf.map_fn(
         stitch,
         segmented_seqs,
-        tf.int32,
+        (tf.int32, tf.float32),
         parallel_iterations=128,
         back_prop=False,
         swap_memory=True)
-    return seqs
+    segs = segs[:,:-1]
+    return seqs, segs
 
 def match_vector(x, y):
     """
