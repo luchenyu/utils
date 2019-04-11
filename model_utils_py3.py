@@ -1465,6 +1465,71 @@ def transformer(tfstruct,
         )
     return tfstruct
 
+def get_tfstruct_si(tfstruct):
+    """
+    get shape invariants of tfstruct
+    """
+    tfstruct = TransformerStruct(
+        field_query_embeds=tf.TensorShape(
+            [tfstruct.field_query_embeds.get_shape()[0],
+             None,
+             tfstruct.field_query_embeds.get_shape()[2]]),
+        field_key_embeds=tf.TensorShape(
+            [tfstruct.field_key_embeds.get_shape()[0],
+             None,
+             tfstruct.field_key_embeds.get_shape()[2]]),
+        field_value_embeds=tf.TensorShape(
+            [tfstruct.field_value_embeds.get_shape()[0],
+             None,
+             tfstruct.field_value_embeds.get_shape()[2]]),
+        posit_embeds=tf.TensorShape(
+            [tfstruct.posit_embeds.get_shape()[0],
+             None,
+             tfstruct.posit_embeds.get_shape()[2]]),
+        token_embeds=tf.TensorShape(
+            [tfstruct.token_embeds.get_shape()[0],
+             None,
+             tfstruct.token_embeds.get_shape()[2]]),
+        masks=tf.TensorShape(
+            [tfstruct.masks.get_shape()[0],
+             None]),
+        querys=tf.TensorShape(
+            [tfstruct.querys.get_shape()[0],
+             None,
+             tfstruct.querys.get_shape()[2]]),
+        keys=tf.TensorShape(
+            [tfstruct.keys.get_shape()[0],
+             None,
+             tfstruct.keys.get_shape()[2]]),
+        values=tf.TensorShape(
+            [tfstruct.values.get_shape()[0],
+             None,
+             tfstruct.values.get_shape()[2]]),
+        encodes=tf.TensorShape(
+            [tfstruct.encodes.get_shape()[0],
+             None,
+             tfstruct.encodes.get_shape()[2]]),
+    )
+    return tfstruct
+
+def init_tfstruct(batch_size, embed_size, posit_size, layer_size, num_layers):
+    """
+    get a tfstruct with zero length
+    """
+    tfstruct = TransformerStruct(
+        field_query_embeds=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        field_key_embeds=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        field_value_embeds=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        posit_embeds=tf.zeros([batch_size, 0, posit_size]),
+        token_embeds=tf.zeros([batch_size, 0, embed_size]),
+        masks=tf.zeros([batch_size, 0], dtype=tf.bool),
+        querys=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        keys=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        values=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        encodes=tf.zeros([batch_size, 0, layer_size]),
+    )
+    return tfstruct
+
 def concat_tfstructs(tfstruct_list):
     """
     concat list of tfstructs: {
@@ -1578,38 +1643,6 @@ class CudnnLSTMCell(object):
             outputs = tf.transpose(outputs, [1,0,2])
             if to_squeeze:
                 outputs = tf.squeeze(outputs, axis=[1])
-        return outputs, state
-
-class GeneralCell(object):
-    """
-    General Cell that defines the interface
-    dummy class
-    """ 
-
-    def __init__(self,
-                 scope,
-                 **kwargs):
-        """
-        args:
-            cell_fn takes assets, inputs, state then produce outputs, state
-            kwargs takes all the args and put in self.assets
-        """
-        self.assets = kwargs
-        self.reuse = None
-        with tf.variable_scope(scope) as sc:
-            self.scope=sc
-
-    def __call__(self,
-                 inputs,
-                 state):
-        """
-        args:
-            inputs: batch_size x input_dim or batch_size x length x input_dim
-            state:
-        """
-        with tf.variable_scope(self.scope, reuse=self.reuse):
-            outputs, state = inputs, state
-        self.reuse = True
         return outputs, state
 
 class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
@@ -1839,17 +1872,19 @@ def gather_state(state, beam_parent):
 
 def greedy_dec(length,
                initial_state,
+               state_si,
                cell,
                candidates_callback,
-               shared_candidates,
+               start_embedding,
+               ids_len,
                gamma=0.65):
     """ A greedy decoder.
     args:
         length: int
         initial_state:
+        state_si: state shape invariants
         cell:
         candidates_callback:
-            when pass None, return SEP embeds and ids
             args:
                 encodes: batch_size x output_dim
             return:
@@ -1857,21 +1892,21 @@ def greedy_dec(length,
                 candidate_ids: [batch_size x ]num_candidates [x word_len]
                 candidate_masks: [batch_size x ]num_candidates
                 logits: batch_size x num_candidates
-        shared_candidates: bool
+        start_embedding: input_dim
+        ids_len: 0 or int or tf.int32
     """
 
     batch_size = tf.shape(initial_state[0])[0] \
         if isinstance(initial_state, tuple) else \
         tf.shape(initial_state)[0]
-    start_embedding, start_id, _, _ = candidates_callback(None)
-    inputs = tf.tile(start_embedding, [batch_size, 1])
+    inputs = tf.tile(tf.expand_dims(start_embedding, axis=0), [batch_size, 1])
     state = initial_state
-    if len(start_id.get_shape()) == 1:
+    if ids_len == 0:
         paths = tf.zeros([batch_size, 0], dtype=tf.int32)
         closed_paths = tf.zeros([batch_size, 0, length], dtype=tf.int32)
-    elif len(start_id.get_shape()) == 2:
-        paths = tf.zeros([batch_size, 0, tf.shape(start_id)[1]], dtype=tf.int32)
-        closed_paths = tf.zeros([batch_size, 0, length, tf.shape(start_id)[1]], dtype=tf.int32)
+    else:
+        paths = tf.zeros([batch_size, 0, ids_len], dtype=tf.int32)
+        closed_paths = tf.zeros([batch_size, 0, length, ids_len], dtype=tf.int32)
     scores = tf.zeros([batch_size])
     closed_scores = tf.zeros([batch_size, 0])
 
@@ -1902,18 +1937,37 @@ def greedy_dec(length,
         open_scores = log_probs[:, 1:]
         indices = tf.argmax(open_scores, 1, output_type=tf.int32)
         batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
-        if shared_candidates:
+        if len(candidate_embeds.get_shape()) == 2:
             new_ids = tf.expand_dims(tf.gather(candidate_ids[1:], indices), axis=1)
             inputs = tf.gather(candidate_embeds[1:], indices)
-        else:
+        elif len(candidate_embeds.get_shape()) == 3:
             new_ids = tf.expand_dims(tf.gather_nd(candidate_ids[:,1:], batch_indices), axis=1)
             inputs = tf.gather_nd(candidate_embeds[:,1:], batch_indices)
         paths = tf.concat([paths, new_ids], axis=1)
         scores += tf.gather_nd(open_scores, batch_indices)
         return inputs, state, paths, scores, closed_paths, closed_scores
 
-    for i in range(length):
-        inputs, state, paths, scores, closed_paths, closed_scores = body(inputs, state, paths, scores, closed_paths, closed_scores)
+    # shape_invariants
+    inputs_si = inputs.get_shape()
+    scores_si = scores.get_shape()
+    closed_scores_si = tf.TensorShape(
+        [closed_scores.get_shape()[0], None])
+    if ids_len == 0:
+        paths_si = tf.TensorShape(
+            [paths.get_shape()[0], None])
+        closed_paths_si = tf.TensorShape(
+            [closed_paths.get_shape()[0], None, closed_paths.get_shape()[2]])
+    else:
+        paths_si = tf.TensorShape(
+            [paths.get_shape()[0], None, paths.get_shape()[2]])
+        closed_paths_si = tf.TensorShape(
+            [closed_paths.get_shape()[0], None, closed_paths.get_shape()[2],
+             closed_paths.get_shape()[3]])
+
+    inputs, state, paths, scores, closed_paths, closed_scores = tf.while_loop(
+        cond, body, (inputs, state, paths, scores, closed_paths, closed_scores),
+        shape_invariants=(inputs_si, state_si, paths_si, scores_si, closed_paths_si, closed_scores_si),
+        back_prop=False)
 
     best_ids = tf.argmax(closed_scores, 1, output_type=tf.int32)
     best_ids = tf.stack([tf.range(batch_size, dtype=tf.int32), best_ids], axis=1)
