@@ -1847,38 +1847,50 @@ def glow(inputs,
 ### Recurrent Decoders ###
 
 def gather_state(state, beam_parent):
-    ta = tf.TensorArray(tf.int32, size=0)
-    t = tf.zeros([], dtype=tf.int32)
-    if type(state) == type(t):
+    """
+    gather entries from state
+    args:
+        state: Tensor, TensorArray or possibly nested structure of them
+        beam_parent: batch_beam_size
+    """
+    def gather_Tensor(state, beam_parent):
         state = tf.gather(state, beam_parent)
-    elif type(state) == type(ta):
+        return state
+
+    def gather_TensorArray(state, beam_parent):
+        size = state.size()
+        last = state.read(size-1)
+        new = tf.gather(last, beam_parent)
+        state = state.write(size, new)
+        return state
+
+    if type(state) == tf.Tensor:
+        state = tf.gather(state, beam_parent)
+    elif type(state) == tf.TensorArray:
         size = state.size()
         last = state.read(size-1)
         new = tf.gather(last, beam_parent)
         state = state.write(size, new)
     else:
-        l = []
-        for s in state:
-            if type(s) == type(t):
-                l.append(tf.gather(s, beam_parent))
-            else:
-                size = s.size()
-                last = s.read(size-1)
-                new = tf.gather(last, beam_parent)
-                s = s.write(size, new)
-                l.append(s)
-        state = tuple(l)
+        l = [gather_state(s, beam_parent) for s in state]
+        if type(state) == tuple:
+            state = tuple(l)
+        elif type(state) == list:
+            state = l
+        else:
+            state = type(state)(*l)
     return state
 
 def greedy_dec(length,
                initial_state,
-               state_si,
+               state_si_fn,
                cell,
                candidates_callback,
                start_embedding,
                ids_len,
                gamma=0.65):
-    """ A greedy decoder.
+    """
+    A greedy decoder.
     args:
         length: int
         initial_state:
@@ -1949,6 +1961,7 @@ def greedy_dec(length,
 
     # shape_invariants
     inputs_si = inputs.get_shape()
+    state_si = state_si_fn(state)
     scores_si = scores.get_shape()
     closed_scores_si = tf.TensorShape(
         [closed_scores.get_shape()[0], None])
@@ -1978,171 +1991,266 @@ def greedy_dec(length,
 
 def stochastic_dec(length,
                    initial_state,
-                   input_embedding,
+                   state_si_fn,
                    cell,
-                   logit_fn,
-                   num_candidates=1):
-    """ A stochastic decoder.
-
+                   candidates_callback,
+                   start_embedding,
+                   ids_len,
+                   num_candidates=1,
+                   gamma=0.65):
+    """
+    A stochastic decoder.
+    args:
+        length: int
+        initial_state:
+        state_si: state shape invariants
+        cell:
+        candidates_callback:
+            args:
+                encodes: batch_size x output_dim
+            return:
+                candidate_embeds: [batch_size x ]num_candidates x input_dim
+                candidate_ids: [batch_size x ]num_candidates [x word_len]
+                candidate_masks: [batch_size x ]num_candidates
+                logits: batch_size x num_candidates
+        start_embedding: input_dim
+        ids_len: 0 or int or tf.int32
     """
 
-    batch_size = tf.shape(initial_state[-1])[0] \
+    batch_size = tf.shape(initial_state[0])[0] \
         if isinstance(initial_state, tuple) else \
         tf.shape(initial_state)[0]
-    inputs_size = input_embedding.get_shape()[1].value
+    inputs = tf.tile(tf.expand_dims(start_embedding, axis=0), [batch_size*num_candidates, 1])
+    beam_parent = tf.reshape(
+        tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1, num_candidates]),
+        [batch_size*num_candidates])
+    state = gather_state(initial_state, beam_parent)
+    if ids_len == 0:
+        paths = tf.zeros([batch_size*num_candidates, 0], dtype=tf.int32)
+        closed_paths = tf.zeros([batch_size*num_candidates, 0, length], dtype=tf.int32)
+    else:
+        paths = tf.zeros([batch_size*num_candidates, 0, ids_len], dtype=tf.int32)
+        closed_paths = tf.zeros([batch_size*num_candidates, 0, length, ids_len], dtype=tf.int32)
+    scores = tf.zeros([batch_size*num_candidates])
+    closed_scores = tf.zeros([batch_size*num_candidates, 0])
 
-    state = initial_state
-    beam_parent = tf.tile(
-        tf.expand_dims(tf.range(batch_size), axis=1),
-        [1, num_candidates])
-    beam_parent = tf.reshape(beam_parent, [batch_size*num_candidates])
-    state = gather_state(state, beam_parent)
-    mask = tf.zeros([batch_size*num_candidates], dtype=tf.bool)
+    def cond(inputs, state, paths, scores, closed_paths, closed_scores):
+        return tf.less(tf.shape(paths)[1], length)
 
-    seqs = tf.TensorArray(tf.int32, size=0, dynamic_size=True, clear_after_read=False)
-    seqs = seqs.write(0, tf.zeros([batch_size*num_candidates], dtype=tf.int32))
-    scores = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
-    scores = scores.write(0, tf.zeros([batch_size*num_candidates]))
-
-    def cond(seqs, scores, state, mask, i):
-        return tf.less(i, length)
-
-    def body(seqs, scores, state, mask, i):
-        inputs = tf.nn.embedding_lookup(input_embedding, seqs.read(i))
-
+    def body(inputs, state, paths, scores, closed_paths, closed_scores):
+        """
+        args:
+            inputs: batch_size x input_dim
+            state:
+            paths: batch_size x current_length [x word_len]
+            scores: batch_size
+            closed_paths: batch_size x current_length x length [x word_len]
+            closed_scores: batch_size x current_length
+        """
+        cur_len = tf.shape(paths)[1]
         outputs, state = cell(inputs, state)
-        logits = logit_fn(outputs)
+        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
+        log_probs = tf.nn.log_softmax(logits)
+        close_scores = (log_probs[:,0] + scores) / tf.pow((tf.cast(cur_len, tf.float32)+1e-12), gamma)
+        closed_scores = tf.concat([closed_scores, tf.expand_dims(close_scores, axis=1)], axis=1)
+        if len(paths.get_shape()) == 2:
+            close_paths = tf.pad(paths, [[0,0],[0,length-cur_len]])
+        elif len(paths.get_shape()) == 3:
+            close_paths = tf.pad(paths, [[0,0],[0,length-cur_len],[0,0]])
+        closed_paths = tf.concat([closed_paths, tf.expand_dims(close_paths, axis=1)], axis=1)
+        open_scores = log_probs[:, 1:]
+        indices = tf.squeeze(tf.random.categorical(open_scores, 1, dtype=tf.int32), [1])
+        batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
+        if len(candidate_embeds.get_shape()) == 2:
+            new_ids = tf.expand_dims(tf.gather(candidate_ids[1:], indices), axis=1)
+            inputs = tf.gather(candidate_embeds[1:], indices)
+        elif len(candidate_embeds.get_shape()) == 3:
+            new_ids = tf.expand_dims(tf.gather_nd(candidate_ids[:,1:], batch_indices), axis=1)
+            inputs = tf.gather_nd(candidate_embeds[:,1:], batch_indices)
+        paths = tf.concat([paths, new_ids], axis=1)
+        scores += tf.gather_nd(open_scores, batch_indices)
+        return inputs, state, paths, scores, closed_paths, closed_scores
 
-        symbol = tf.squeeze(tf.multinomial(logits, 1), [1])
-        score = tf.reduce_sum(tf.one_hot(symbol, tf.shape(logits)[1]) * logits, axis=1)
-        symbol = tf.where(mask,
-                          tf.zeros([batch_size*num_candidates], dtype=tf.int32),
-                          tf.cast(symbol, tf.int32))
-        score *= tf.cast(tf.logical_not(mask), tf.float32)
-        mask = tf.equal(symbol, 0)
-        seqs = seqs.write(i+1, symbol)
-        scores = scores.write(i+1, score)
-        i += 1
-        return seqs, scores, state, mask, i
+    # shape_invariants
+    inputs_si = inputs.get_shape()
+    state_si = state_si_fn(state)
+    scores_si = scores.get_shape()
+    closed_scores_si = tf.TensorShape(
+        [closed_scores.get_shape()[0], None])
+    if ids_len == 0:
+        paths_si = tf.TensorShape(
+            [paths.get_shape()[0], None])
+        closed_paths_si = tf.TensorShape(
+            [closed_paths.get_shape()[0], None, closed_paths.get_shape()[2]])
+    else:
+        paths_si = tf.TensorShape(
+            [paths.get_shape()[0], None, paths.get_shape()[2]])
+        closed_paths_si = tf.TensorShape(
+            [closed_paths.get_shape()[0], None, closed_paths.get_shape()[2],
+             closed_paths.get_shape()[3]])
 
-    seqs, scores, state, mask, i = tf.while_loop(
-        cond, body, [seqs, scores, state, mask, 0],
-        back_prop=False, swap_memory=True)
-    candidates = tf.reshape(tf.transpose(seqs.stack(), [1,0])[:,1:], [batch_size, num_candidates, length])
-    scores = tf.reshape(
-        tf.reduce_sum(scores.stack(), axis=0),
-        [batch_size, num_candidates])
+    inputs, state, paths, scores, closed_paths, closed_scores = tf.while_loop(
+        cond, body, (inputs, state, paths, scores, closed_paths, closed_scores),
+        shape_invariants=(inputs_si, state_si, paths_si, scores_si, closed_paths_si, closed_scores_si),
+        back_prop=False)
 
-    return candidates, scores
+    best_ids = tf.squeeze(tf.random.categorical(closed_scores, 1, dtype=tf.int32), [1])
+    best_ids = tf.stack([tf.range(batch_size*num_candidates, dtype=tf.int32), best_ids], axis=1)
+    best_paths = tf.stack(
+        tf.split(tf.gather_nd(closed_paths, best_ids), num_candidates, axis=0),
+        axis=1)
+    best_scores = tf.stack(
+        tf.split(tf.gather_nd(closed_scores, best_ids), num_candidates, axis=0),
+        axis=1)
 
-# beam decoder
+    return best_paths, best_scores
+
 def beam_dec(length,
              initial_state,
-             input_embedding,
+             state_si_fn,
              cell,
-             logit_fn,
+             candidates_callback,
+             start_embedding,
+             ids_len,
+             beam_size=16,
              num_candidates=1,
-             beam_size=100,
              gamma=0.65):
-    """ A basic beam decoder
-
+    """
+    A beam decoder.
+    args:
+        length: int
+        initial_state:
+        state_si: state shape invariants
+        cell:
+        candidates_callback:
+            args:
+                encodes: batch_size x output_dim
+            return:
+                candidate_embeds: [batch_size x ]num_candidates x input_dim
+                candidate_ids: [batch_size x ]num_candidates [x word_len]
+                candidate_masks: [batch_size x ]num_candidates
+                logits: batch_size x num_candidates
+        start_embedding: input_dim
+        ids_len: 0 or int or tf.int32
     """
 
-    batch_size = tf.shape(initial_state[-1])[0] \
+    batch_size = tf.shape(initial_state[0])[0] \
         if isinstance(initial_state, tuple) else \
         tf.shape(initial_state)[0]
-    inputs_size = input_embedding.get_shape()[1].value
-    inputs = tf.nn.embedding_lookup(
-        input_embedding, tf.zeros([batch_size], dtype=tf.int32))
-    vocab_size = tf.shape(input_embedding)[0]
+    inputs = tf.tile(tf.expand_dims(start_embedding, axis=0), [batch_size*beam_size, 1])
+    beam_parent = tf.reshape(
+        tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1, beam_size]),
+        [batch_size*beam_size])
+    state = gather_state(initial_state, beam_parent)
+    if ids_len == 0:
+        paths = tf.zeros([batch_size*beam_size, 0], dtype=tf.int32)
+        closed_paths = tf.zeros([batch_size*beam_size, 0, length], dtype=tf.int32)
+    else:
+        paths = tf.zeros([batch_size*beam_size, 0, ids_len], dtype=tf.int32)
+        closed_paths = tf.zeros([batch_size*beam_size, 0, length, ids_len], dtype=tf.int32)
+    scores = tf.concat(
+        [tf.ones([batch_size, 1]), tf.zeros([batch_size, beam_size-1])], axis=1)
+    scores = tf.reshape(tf.log(scores), [batch_size*beam_size])
+    closed_scores = tf.zeros([batch_size*beam_size, 0])
 
-    # iter
-    outputs, state = cell(inputs, initial_state)
-    logits = logit_fn(outputs)
+    def cond(inputs, state, paths, scores, closed_paths, closed_scores):
+        return tf.less(tf.shape(paths)[1], length)
 
-    prev = tf.nn.log_softmax(logits)
-    probs = tf.slice(prev, [0, 1], [-1, -1])
-    best_probs, indices = tf.nn.top_k(probs, beam_size)
-
-    symbols = indices % vocab_size + 1
-    beam_parent = indices // (vocab_size - 1)
-    beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size), 1)+beam_parent, [-1])
-    paths = tf.reshape(symbols, [-1, 1])
-
-    state = gather_state(state, beam_parent)
-
-    tf.get_variable_scope().reuse_variables()
-    paths = tf.TensorArray(tf.int32, size=0,
-        dynamic_size=True, infer_shape=False).write(0, paths)
-    candidates = tf.TensorArray(tf.int32, size=0, dynamic_size=True, clear_after_read=False)
-    scores = tf.TensorArray(tf.float32, size=0, dynamic_size=True, clear_after_read=False)
-
-    def cond(paths, candidates, scores, state, best_probs, i):
-        return tf.less(i, length)
-
-    def body(paths, candidates, scores, state, best_probs, i):
-
-        pths = paths.read(i)
-        pths = tf.reshape(pths, [tf.shape(best_probs)[0]*tf.shape(best_probs)[1], -1])
-        inputs = tf.nn.embedding_lookup(input_embedding, pths[:,-1])
+    def body(inputs, state, paths, scores, closed_paths, closed_scores):
+        """
+        args:
+            inputs: batch_size x input_dim
+            state:
+            paths: batch_size x current_length [x word_len]
+            scores: batch_size
+            closed_paths: batch_size x current_length x length [x word_len]
+            closed_scores: batch_size x current_length
+        """
+        cur_len = tf.shape(paths)[1]
 
         # iter
         outputs, state = cell(inputs, state)
-        logits = logit_fn(outputs)
+        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
+        vocab_size = tf.shape(logits)[1]
+        log_probs = tf.nn.log_softmax(logits)
 
-        prev = tf.reshape(
-            tf.nn.log_softmax(logits),
-            [batch_size, beam_size, vocab_size])
+        # closed 
+        close_scores = (log_probs[:,0] + scores) / tf.pow((tf.cast(cur_len, tf.float32)+1e-12), gamma)
+        closed_scores = tf.concat([closed_scores, tf.expand_dims(close_scores, axis=1)], axis=1)
+        if len(paths.get_shape()) == 2:
+            close_paths = tf.pad(paths, [[0,0],[0,length-cur_len]])
+        elif len(paths.get_shape()) == 3:
+            close_paths = tf.pad(paths, [[0,0],[0,length-cur_len],[0,0]])
+        closed_paths = tf.concat([closed_paths, tf.expand_dims(close_paths, axis=1)], axis=1)
 
-        # add the path and score of the candidates in the current beam to the lists
-        fn = lambda seq: tf.size(tf.unique(seq)[0])
-        uniq_len = tf.reshape(
-            tf.cast(tf.map_fn(fn,
-                                  pths,
-                                  dtype=tf.int32,
-                                  parallel_iterations=100000,
-                                  back_prop=False,
-                                  swap_memory=True), tf.float32),
-            [batch_size, beam_size])
-        close_score = best_probs / (uniq_len ** gamma) + tf.squeeze(
-            tf.slice(prev, [0, 0, 0], [-1, -1, 1]), [2])
+        # open
+        open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
+        open_scores = tf.reshape(open_scores, [batch_size, -1])
+        top_scores, top_indices = tf.nn.top_k(open_scores, beam_size)
+        scores = tf.reshape(top_scores, [-1])
 
-        candidates = candidates.write(i, tf.reshape(
-            tf.pad(pths, [[0, 0],[0, length-i-1]], "CONSTANT"),
-            [batch_size, beam_size, length]))
-        scores = scores.write(i, close_score)
-
-        prev += tf.expand_dims(best_probs, 2)
-        probs = tf.reshape(tf.slice(prev, [0, 0, 1], [-1, -1, -1]), [batch_size, -1])
-        best_probs, indices = tf.nn.top_k(probs, beam_size)
-
-        symbols = indices % (vocab_size - 1) + 1
-        beam_parent = indices // (vocab_size - 1)
+        # gather beam parent
+        beam_parent = tf.floor_div(top_indices, (vocab_size-1))
         beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size)*beam_size, 1)+beam_parent, [-1])
-        pths = tf.gather(pths, beam_parent)
-        pths = tf.concat([pths, tf.reshape(symbols, [-1, 1])], axis=1)
-        paths = paths.write(i+1, pths)
-
         state = gather_state(state, beam_parent)
-        i += 1
+        paths = tf.gather(paths, beam_parent)
 
-        return paths, candidates, scores, state, best_probs, i
+        # next
+        indices = tf.floormod(top_indices, (vocab_size-1))
+        indices = tf.reshape(indices, [-1])
+        batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
+        if len(candidate_embeds.get_shape()) == 2:
+            open_candidate_ids = candidate_ids[1:]
+            open_candidate_embeds = candidate_embeds[1:]
+            new_ids = tf.expand_dims(tf.gather(open_candidate_ids, indices), axis=1)
+            inputs = tf.gather(open_candidate_embeds, indices)
+        elif len(candidate_embeds.get_shape()) == 3:
+            open_candidate_ids = tf.gather(candidate_ids[:,1:], beam_parent)
+            open_candidate_embeds = tf.gather(candidate_embeds[:,1:], beam_parent)
+            new_ids = tf.expand_dims(tf.gather_nd(open_candidate_ids, batch_indices), axis=1)
+            inputs = tf.gather_nd(open_candidate_embeds, batch_indices)
+        paths = tf.concat([paths, new_ids], axis=1)
 
-    _, candidates, scores, _, _, _ = tf.while_loop(
-        cond, body, [paths, candidates, scores, state, best_probs, 0],
-        back_prop=False, parallel_iterations=128, swap_memory=True)
+        return inputs, state, paths, scores, closed_paths, closed_scores
 
-    # pick the topk from the candidates in the lists
-    candidates = tf.reshape(tf.transpose(candidates.stack(), [1,0,2,3]), [-1, length])
-    scores = tf.reshape(tf.transpose(scores.stack(), [1,0,2]), [batch_size, -1])
-    best_scores, indices = tf.nn.top_k(scores, num_candidates)
-    indices = tf.reshape(
-        tf.expand_dims(
-            tf.range(batch_size) * (beam_size * (length-1) + 1), 1) + indices,
-        [-1])
-    best_candidates = tf.reshape(tf.gather(candidates, indices), [batch_size, num_candidates, length])
+    # shape_invariants
+    inputs_si = inputs.get_shape()
+    state_si = state_si_fn(state)
+    scores_si = scores.get_shape()
+    closed_scores_si = tf.TensorShape(
+        [closed_scores.get_shape()[0], None])
+    if ids_len == 0:
+        paths_si = tf.TensorShape(
+            [paths.get_shape()[0], None])
+        closed_paths_si = tf.TensorShape(
+            [closed_paths.get_shape()[0], None, closed_paths.get_shape()[2]])
+    else:
+        paths_si = tf.TensorShape(
+            [paths.get_shape()[0], None, paths.get_shape()[2]])
+        closed_paths_si = tf.TensorShape(
+            [closed_paths.get_shape()[0], None, closed_paths.get_shape()[2],
+             closed_paths.get_shape()[3]])
 
-    return best_candidates, best_scores
+    inputs, state, paths, scores, closed_paths, closed_scores = tf.while_loop(
+        cond, body, (inputs, state, paths, scores, closed_paths, closed_scores),
+        shape_invariants=(inputs_si, state_si, paths_si, scores_si, closed_paths_si, closed_scores_si),
+        back_prop=False)
+
+    closed_scores = tf.reshape(closed_scores, [batch_size, beam_size*length])
+    if ids_len == 0:
+        closed_paths = tf.reshape(
+            closed_paths, [batch_size, beam_size*length, length])
+    else:
+        closed_paths = tf.reshape(
+            closed_paths, [batch_size, beam_size*length, length, ids_len])
+    best_scores, best_indices = tf.nn.top_k(closed_scores, num_candidates)
+    batch_best_indices = tf.stack(
+        [tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1, num_candidates]),
+         best_indices],
+        axis=2)
+    best_paths = tf.gather_nd(closed_paths, batch_best_indices)
+
+    return best_paths, best_scores
 
 # beam decoder
 def stochastic_beam_dec(length,
