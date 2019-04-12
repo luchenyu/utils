@@ -58,7 +58,7 @@ class AtomicVocab(Vocab):
         if rev_atomize_method != None:
             self.rev_atomize_method = rev_atomize_method
         else:
-            _map_ = {self.pad: '', self.sep: '\n', self.unk: '*'}
+            _map_ = {self.pad: '', self.sep: '\t', self.unk: '*'}
             def _rev_atomize_method(toks):
                 toks = [_map_[tok] if tok in _map_ else tok for tok in toks]
                 molecule = ''.join(toks)
@@ -328,7 +328,7 @@ def seqs_to_tokens(seqs, word_vocab):
     seqs = list(filter(lambda i: i != pad_id, seqs))
     tokens = word_vocab.idx2doc(seqs)
     if word_vocab.sep != None:
-        tokens = ['\n' if tok == word_vocab.sep else tok for tok in tokens]
+        tokens = ['\t' if tok == word_vocab.sep else tok for tok in tokens]
     if word_vocab.unk != None:
         tokens = ['*' if tok == word_vocab.unk else tok for tok in tokens]
     return tokens
