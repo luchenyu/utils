@@ -14,7 +14,7 @@
 # ==============================================================================
 import numpy as np
 import math
-from collections import namedtuple
+from collections import namedtuple, Iterable
 import tensorflow as tf
 from tensorflow.python.util import nest
 
@@ -1347,58 +1347,56 @@ def transformer(tfstruct,
                 reuse=None,
                 scope=None):
     """Transformer encoder
-       in the form of key-value
-       args:
-           tfstruct: {
-               'field_query_embeds': batch_size x length x num_layers*layer_size,
-               'field_key_embeds': batch_size x length x num_layers*layer_size,
-               'field_value_embeds': batch_size x length x num_layers*layer_size,
-               'posit_embeds': batch_size x length x layer_size,
-               'token_embeds': batch_size x length x layer_size,
-               'masks': batch_size x length,
-               'querys': batch_size x length x num_layers*layer_size,
-               'keys': batch_size x length x num_layers*layer_size,
-               'values': batch_size x length x num_layers*layer_size,
-               'encodes': batch_size x length x layer_size
-           }
-           num_layers: int
-           layer_size: int
-           extra_tfstruct: same structure, already encoded
-           num_heads: int
-           attn_masks: batch_size x length x (length+extra_length)
-       return:
-           tfstruct: input tfstruct with missing slots filled
+    in the form of key-value
+    args:
+       tfstruct: {
+           'field_query_embeds': tuple (batch_size x length x layer_size) * num_layers,
+           'field_key_embeds': tuple (batch_size x length x layer_size) * num_layers,
+           'field_value_embeds': tuple (batch_size x length x layer_size) * num_layers,
+           'posit_embeds': batch_size x length x posit_size,
+           'token_embeds': batch_size x length x embed_size,
+           'masks': batch_size x length,
+           'querys': tuple (batch_size x length x layer_size) * num_layers,
+           'keys': tuple (batch_size x length x layer_size) * num_layers,
+           'values': tuple (batch_size x length x layer_size) * num_layers,
+           'encodes': batch_size x length x layer_size
+       }
+       num_layers: int
+       layer_size: int
+       extra_tfstruct: same structure, already encoded, or list/tuple
+       num_heads: int
+       attn_masks: batch_size x length x (length+extra_length)
+    return:
+       tfstruct: input tfstruct with missing slots filled
     """
 
     with tf.variable_scope(scope,
                            "Transformer",
-                           [item for item in tfstruct] if extra_tfstruct is None else [item for item in tfstruct] + [item for item in extra_tfstruct],
+                           flatten_structure([tfstruct, extra_tfstruct]),
                            reuse=reuse) as sc:
 
         batch_size = tf.shape(tfstruct.token_embeds)[0]
         length = tf.shape(tfstruct.token_embeds)[1]
-        extra_length = 0
-        if not extra_tfstruct is None:
-            extra_length = tf.shape(extra_tfstruct.token_embeds)[1]
+
+        if extra_tfstruct is None:
+            extra_length = 0
+        elif isinstance(extra_tfstruct, TransformerStruct):
+            extra_length = tf.shape(extra_tfstruct.masks)[1]
+        else:
+            extra_length = sum([tf.shape(e.masks)[1] for e in extra_tfstruct])
+
         token_encodes = fully_connected(
             tfstruct.token_embeds,
             layer_size,
             dropout=dropout,
             is_training=is_training,
             scope='enc_projs')
+
         if attn_masks == None:
             attn_masks = tf.ones([batch_size, length, length+extra_length], dtype=tf.bool)
         attn_masks = tf.logical_and(attn_masks,
             tf.logical_not(tf.pad(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool), [[0,0],[0,0],[0,extra_length]])))
 
-        field_query_embeds = tf.split(tfstruct.field_query_embeds, num_layers, axis=-1)
-        field_key_embeds = tf.split(tfstruct.field_key_embeds, num_layers, axis=-1)
-        field_value_embeds = tf.split(tfstruct.field_value_embeds, num_layers, axis=-1)
-        if not extra_tfstruct is None:
-            extra_field_key_embeds = tf.split(extra_tfstruct.field_key_embeds, num_layers, axis=-1)
-            extra_field_value_embeds = tf.split(extra_tfstruct.field_value_embeds, num_layers, axis=-1)
-            extra_keys = tf.split(extra_tfstruct.keys, num_layers, axis=-1)
-            extra_values = tf.split(extra_tfstruct.values, num_layers, axis=-1)
         query_list, key_list, value_list = [], [], []
 
         for i in range(num_layers):
@@ -1414,27 +1412,46 @@ def transformer(tfstruct,
                     dropout=dropout,
                     is_training=is_training,
                     scope="query_projs")
+                querys += tfstruct.field_query_embeds[i]
                 query_list.append(querys)
-                querys += field_query_embeds[i]
                 keys = fully_connected(
                     keys,
                     layer_size,
                     dropout=dropout,
                     is_training=is_training,
                     scope="key_projs")
+                keys += tfstruct.field_key_embeds[i]
                 key_list.append(keys)
-                keys += field_key_embeds[i]
                 values = GLU(
                     values,
                     layer_size,
                     dropout=dropout,
                     is_training=is_training,
                     scope="value_projs")
+                values += tfstruct.field_value_embeds[i]
                 value_list.append(values)
-                values += field_value_embeds[i]
-                if not extra_tfstruct is None:
-                    keys = tf.concat([keys, extra_keys[i] + extra_field_key_embeds[i]], axis=1)
-                    values = tf.concat([values, extra_values[i] + extra_field_value_embeds[i]], axis=1)
+                if extra_tfstruct is None:
+                    pass
+                else:
+                    if isinstance(extra_tfstruct, TransformerStruct):
+                        concat_keys = tf.concat(
+                            [keys, extra_tfstruct.keys[i]],
+                            axis=1)
+                        concat_values = tf.concat(
+                            [values, extra_tfstruct.values[i]],
+                            axis=1)
+                    else:
+                        concat_keys = tf.concat(
+                            [keys,] + [e.keys[i] for e in extra_tfstruct],
+                            axis=1)
+                        concat_values = tf.concat(
+                            [values,] + [e.values[i] for e in extra_tfstruct],
+                            axis=1)
+                    keys, values = tf.cond(
+                        tf.greater(extra_length, 0),
+                        lambda: (concat_keys, concat_values),
+                        lambda: (keys, values))
+
                 attn_feat = attention_simple(querys, keys, values,
                     num_heads=num_heads, masks=attn_masks, size=layer_size,
                     dropout=dropout, is_training=is_training)
@@ -1458,9 +1475,9 @@ def transformer(tfstruct,
             posit_embeds=tfstruct.posit_embeds,
             token_embeds=tfstruct.token_embeds,
             masks=tfstruct.masks,
-            querys=tf.concat(query_list, axis=-1),
-            keys=tf.concat(key_list, axis=-1),
-            values=tf.concat(value_list, axis=-1),
+            querys=tuple(query_list),
+            keys=tuple(key_list),
+            values=tuple(value_list),
             encodes=encodes_normed,
         )
     return tfstruct
@@ -1470,18 +1487,15 @@ def get_tfstruct_si(tfstruct):
     get shape invariants of tfstruct
     """
     tfstruct = TransformerStruct(
-        field_query_embeds=tf.TensorShape(
-            [tfstruct.field_query_embeds.get_shape()[0],
-             None,
-             tfstruct.field_query_embeds.get_shape()[2]]),
-        field_key_embeds=tf.TensorShape(
-            [tfstruct.field_key_embeds.get_shape()[0],
-             None,
-             tfstruct.field_key_embeds.get_shape()[2]]),
-        field_value_embeds=tf.TensorShape(
-            [tfstruct.field_value_embeds.get_shape()[0],
-             None,
-             tfstruct.field_value_embeds.get_shape()[2]]),
+        field_query_embeds=tuple(
+            [tf.TensorShape([item.get_shape()[0], None, item.get_shape()[2]])
+             for item in tfstruct.field_query_embeds]),
+        field_key_embeds=tuple(
+            [tf.TensorShape([item.get_shape()[0], None, item.get_shape()[2]])
+             for item in tfstruct.field_key_embeds]),
+        field_value_embeds=tuple(
+            [tf.TensorShape([item.get_shape()[0], None, item.get_shape()[2]])
+             for item in tfstruct.field_value_embeds]),
         posit_embeds=tf.TensorShape(
             [tfstruct.posit_embeds.get_shape()[0],
              None,
@@ -1493,18 +1507,15 @@ def get_tfstruct_si(tfstruct):
         masks=tf.TensorShape(
             [tfstruct.masks.get_shape()[0],
              None]),
-        querys=tf.TensorShape(
-            [tfstruct.querys.get_shape()[0],
-             None,
-             tfstruct.querys.get_shape()[2]]),
-        keys=tf.TensorShape(
-            [tfstruct.keys.get_shape()[0],
-             None,
-             tfstruct.keys.get_shape()[2]]),
-        values=tf.TensorShape(
-            [tfstruct.values.get_shape()[0],
-             None,
-             tfstruct.values.get_shape()[2]]),
+        querys=tuple(
+            [tf.TensorShape([item.get_shape()[0], None, item.get_shape()[2]])
+             for item in tfstruct.querys]),
+        keys=tuple(
+            [tf.TensorShape([item.get_shape()[0], None, item.get_shape()[2]])
+             for item in tfstruct.keys]),
+        values=tuple(
+            [tf.TensorShape([item.get_shape()[0], None, item.get_shape()[2]])
+             for item in tfstruct.values]),
         encodes=tf.TensorShape(
             [tfstruct.encodes.get_shape()[0],
              None,
@@ -1517,15 +1528,15 @@ def init_tfstruct(batch_size, embed_size, posit_size, layer_size, num_layers):
     get a tfstruct with zero length
     """
     tfstruct = TransformerStruct(
-        field_query_embeds=tf.zeros([batch_size, 0, num_layers*layer_size]),
-        field_key_embeds=tf.zeros([batch_size, 0, num_layers*layer_size]),
-        field_value_embeds=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        field_query_embeds=(tf.zeros([batch_size, 0, layer_size]),)*num_layers,
+        field_key_embeds=(tf.zeros([batch_size, 0, layer_size]),)*num_layers,
+        field_value_embeds=(tf.zeros([batch_size, 0, layer_size]),)*num_layers,
         posit_embeds=tf.zeros([batch_size, 0, posit_size]),
         token_embeds=tf.zeros([batch_size, 0, embed_size]),
         masks=tf.zeros([batch_size, 0], dtype=tf.bool),
-        querys=tf.zeros([batch_size, 0, num_layers*layer_size]),
-        keys=tf.zeros([batch_size, 0, num_layers*layer_size]),
-        values=tf.zeros([batch_size, 0, num_layers*layer_size]),
+        querys=(tf.zeros([batch_size, 0, layer_size]),)*num_layers,
+        keys=(tf.zeros([batch_size, 0, layer_size]),)*num_layers,
+        values=(tf.zeros([batch_size, 0, layer_size]),)*num_layers,
         encodes=tf.zeros([batch_size, 0, layer_size]),
     )
     return tfstruct
@@ -1533,20 +1544,20 @@ def init_tfstruct(batch_size, embed_size, posit_size, layer_size, num_layers):
 def concat_tfstructs(tfstruct_list):
     """
     concat list of tfstructs: {
-       'field_query_embeds': batch_size x length x num_layers*layer_size,
-       'field_key_embeds': batch_size x length x num_layers*layer_size,
-       'field_value_embeds': batch_size x length x num_layers*layer_size,
-       'posit_embeds': batch_size x length x layer_size,
-       'token_embeds': batch_size x length x layer_size,
+       'field_query_embeds': tuple (batch_size x length x layer_size) * num_layers,
+       'field_key_embeds': tuple (batch_size x length x layer_size) * num_layers,
+       'field_value_embeds': tuple (batch_size x length x layer_size) * num_layers,
+       'posit_embeds': batch_size x length x posit_size,
+       'token_embeds': batch_size x length x embed_size,
        'masks': batch_size x length,
-       'querys': batch_size x length x num_layers*layer_size,
-       'keys': batch_size x length x num_layers*layer_size,
-       'values': batch_size x length x num_layers*layer_size,
+       'querys': tuple (batch_size x length x layer_size) * num_layers,
+       'keys': tuple (batch_size x length x layer_size) * num_layers,
+       'values': tuple (batch_size x length x layer_size) * num_layers,
        'encodes': batch_size x length x layer_size
     }
     return: concat tfstructs
     """
-    tfstruct_list = list(filter(lambda f: f != None, tfstruct_list))
+    tfstruct_list = list(filter(lambda i: not i is None, tfstruct_list))
     if len(tfstruct_list) == 0:
         return None
     elif len(tfstruct_list) == 1:
@@ -1554,31 +1565,40 @@ def concat_tfstructs(tfstruct_list):
     else:
         items = []
         for i in range(len(tfstruct_list[0])):
-            feats = [f[i] for f in tfstruct_list]
-            if feats[0] is None:
+            feats = [tfstruct[i] for tfstruct in tfstruct_list]
+            feats = list(filter(lambda f: not f is None, feats))
+            if len(feats) == 0:
                 items.append(None)
+            elif len(feats) == 1:
+                items.append(feats[0])
             else:
-                items.append(tf.concat(feats, axis=1))
+                if isinstance(feats[0], tf.Tensor):
+                    items.append(tf.concat(feats, axis=1))
+                elif isinstance(feats[0], tuple):
+                    items.append(
+                        tuple([tf.concat(list(fi), axis=1) for fi in zip(*feats)]))
+                else:
+                    items.append(none)
         tfstruct = TransformerStruct(*items)
         return tfstruct
 
 def split_tfstructs(tfstruct, num_or_size_splits):
     """
     tfstruct: {
-       'field_query_embeds': batch_size x length x num_layers*layer_size,
-       'field_key_embeds': batch_size x length x num_layers*layer_size,
-       'field_value_embeds': batch_size x length x num_layers*layer_size,
-       'posit_embeds': batch_size x length x layer_size,
-       'token_embeds': batch_size x length x layer_size,
+       'field_query_embeds': tuple (batch_size x length x layer_size) * num_layers,
+       'field_key_embeds': tuple (batch_size x length x layer_size) * num_layers,
+       'field_value_embeds': tuple (batch_size x length x layer_size) * num_layers,
+       'posit_embeds': batch_size x length x posit_size,
+       'token_embeds': batch_size x length x embed_size,
        'masks': batch_size x length,
-       'querys': batch_size x length x num_layers*layer_size,
-       'keys': batch_size x length x num_layers*layer_size,
-       'values': batch_size x length x num_layers*layer_size,
+       'querys': tuple (batch_size x length x layer_size) * num_layers,
+       'keys': tuple (batch_size x length x layer_size) * num_layers,
+       'values': tuple (batch_size x length x layer_size) * num_layers,
        'encodes': batch_size x length x layer_size
     }
     return: list of tfstructs
     """
-    num_splits = len(num_or_size_splits) if type(num_or_size_splits) == list else num_or_size_splits
+    num_splits = len(num_or_size_splits) if isinstance(num_or_size_splits, list) else num_or_size_splits
     if tfstruct is None:
         return []
     elif num_splits == 1:
@@ -1588,10 +1608,16 @@ def split_tfstructs(tfstruct, num_or_size_splits):
         items_list = []
         for i in range(len(tfstruct)):
             if tfstruct[i] is None:
-                items_list.append(tuple([None]*num_splits))
-            else:
+                items_list.append((None,)*num_splits)
+            elif isinstance(tfstruct[i], tf.Tensor):
                 items_list.append(
                     tuple(tf.split(tfstruct[i], num_or_size_splits, axis=1)))
+            elif isinstance(tfstruct[i], tuple):
+                items_list.append(
+                    tuple(zip(*[tuple(tf.split(item, num_or_size_splits, axis=1))
+                                for item in tfstruct[i]])))
+            else:
+                items_list.append((None,)*num_splits)
         items_list = list(zip(*items_list))
         for items in items_list:
             tfstruct_list.append(TransformerStruct(*items))
@@ -2175,13 +2201,10 @@ def beam_dec(length,
         log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
 
         # closing mask
-        beam_scores = log_probs + tf.expand_dims(scores, axis=1)
-        beam_scores = tf.reshape(beam_scores, [batch_size, 1, beam_size*vocab_size])
-        beam_scores = tf.reshape(
-            tf.tile(beam_scores, [1, beam_size, 1]),
-            [batch_size*beam_size, beam_size*vocab_size])
-        closing_targets = tf.tile(tf.range(beam_size)*vocab_size, [batch_size])
-        closing_masks = tf.math.in_top_k(beam_scores, closing_targets, beam_size)
+        closing_masks = tf.math.in_top_k(
+            log_probs,
+            tf.zeros([batch_size*beam_size], dtype=tf.int32),
+            beam_size)
 
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / tf.cast(cur_len, tf.float32)
@@ -2199,7 +2222,7 @@ def beam_dec(length,
         # open
         open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
         open_scores = tf.reshape(open_scores, [batch_size, -1])
-        top_scores, top_indices = tf.nn.top_k(open_scores, beam_size)
+        top_scores, top_indices = tf.math.top_k(open_scores, beam_size)
         scores = tf.reshape(top_scores, [-1])
 
         # gather beam parent
@@ -2248,7 +2271,7 @@ def beam_dec(length,
         cond, body, (inputs, state, paths, scores, closed_paths, closed_scores),
         shape_invariants=(inputs_si, state_si, paths_si, scores_si, closed_paths_si, closed_scores_si),
         back_prop=False,
-        parallel_iterations=64,
+        parallel_iterations=4,
         maximum_iterations=length)
 
     closed_scores = tf.reshape(closed_scores, [batch_size, beam_size*length])
@@ -2341,13 +2364,10 @@ def stochastic_beam_dec(length,
         log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
 
         # closing mask
-        beam_scores = log_probs + tf.expand_dims(scores, axis=1)
-        beam_scores = tf.reshape(beam_scores, [batch_size, 1, beam_size*vocab_size])
-        beam_scores = tf.reshape(
-            tf.tile(beam_scores, [1, beam_size, 1]),
-            [batch_size*beam_size, beam_size*vocab_size])
-        closing_targets = tf.tile(tf.range(beam_size)*vocab_size, [batch_size])
-        closing_masks = tf.math.in_top_k(beam_scores, closing_targets, beam_size)
+        closing_masks = tf.math.in_top_k(
+            log_probs,
+            tf.zeros([batch_size*beam_size], dtype=tf.int32),
+            beam_size)
 
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / tf.cast(cur_len, tf.float32)
@@ -2414,7 +2434,7 @@ def stochastic_beam_dec(length,
         cond, body, (inputs, state, paths, scores, closed_paths, closed_scores),
         shape_invariants=(inputs_si, state_si, paths_si, scores_si, closed_paths_si, closed_scores_si),
         back_prop=False,
-        parallel_iterations=64,
+        parallel_iterations=4,
         maximum_iterations=length)
 
     closed_scores = tf.reshape(closed_scores, [batch_size, beam_size*length])
@@ -2738,3 +2758,21 @@ def unique_vector(x):
     unique_x=tf.gather(x,r_cond_mul4)
 
     return unique_x, r_cond_mul4
+
+def flatten_structure(struct):
+    """flatten a possibly nested struct into a list"""
+    flat_list = []
+    if struct is None:
+        pass
+    elif isinstance(struct, str):
+        flat_list.append(struct)
+    elif isinstance(struct, tf.Tensor):
+        flat_list.append(struct)
+    elif isinstance(struct, tf.TensorArray):
+        flat_list.append(struct)
+    elif isinstance(struct, Iterable):
+        for item in struct:
+            flat_list.extend(flatten_structure(item))
+    else:
+        flat_list.append(struct)
+    return flat_list
