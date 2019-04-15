@@ -918,64 +918,7 @@ def cudnn_lstm_legacy(inputs,
     return hiddens, tf.concat([output_h, output_c], axis=1)
 
 
-class GRUCell(tf.contrib.rnn.RNNCell):
-  """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078)."""
-
-  def __init__(self, num_units, input_size=None, activation=tf.tanh, linear=fully_connected):
-    if input_size is not None:
-      logging.warn("%s: The input_size parameter is deprecated.", self)
-    self._num_units = num_units
-    self._activation = activation
-    self._linear = linear
-
-  @property
-  def state_size(self):
-    return self._num_units
-
-  @property
-  def output_size(self):
-    return self._num_units
-
-  def __call__(self, inputs, state, scope=None):
-    """Gated recurrent unit (GRU) with nunits cells."""
-    with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
-      with tf.variable_scope("Gates"):  # Reset gate and update gate.
-        # We start with bias of 1.0 to not reset and not update.
-        r, u = tf.split(fully_connected(tf.concat([inputs, state], 1),
-                                             2 * self._num_units), 2, 1)
-        r, u = tf.sigmoid(r), tf.sigmoid(u)
-      with tf.variable_scope("Candidate"):
-        c = self._activation(self._linear(tf.concat([inputs, r * state], 1),
-                                     self._num_units))
-      new_h = u * state + (1 - u) * c
-    return new_h, new_h
-
-class RANCell(tf.contrib.rnn.RNNCell):
-  """Recurrent Additive Unit cell."""
-
-  def __init__(self, num_units, activation=tf.nn.relu, linear=fully_connected):
-    self._num_units = num_units
-    self._activation = activation
-    self._linear = linear
-
-  @property
-  def state_size(self):
-    return self._num_units
-
-  @property
-  def output_size(self):
-    return self._num_units
-
-  def __call__(self, inputs, state, scope=None):
-    with tf.variable_scope(scope or type(self).__name__):  # "GRUCell"
-      with tf.variable_scope("Gates"):  # Reset gate and update gate.
-        # We start with bias of 1.0 to not reset and not update.
-        i, f = tf.split(fully_connected(tf.concat([inputs, state], 1),
-                                             2 * self._num_units), 2, 1)
-        i, f = tf.sigmoid(i), tf.sigmoid(f)
-      new_h = f * state + i * inputs
-    return new_h, new_h
-
+### Attention ###
 
 def attention_simple(querys,
                      keys,
@@ -1433,23 +1376,26 @@ def transformer(tfstruct,
                 if extra_tfstruct is None:
                     pass
                 else:
-                    if isinstance(extra_tfstruct, TransformerStruct):
-                        concat_keys = tf.concat(
-                            [keys, extra_tfstruct.keys[i]],
-                            axis=1)
-                        concat_values = tf.concat(
-                            [values, extra_tfstruct.values[i]],
-                            axis=1)
-                    else:
-                        concat_keys = tf.concat(
-                            [keys,] + [e.keys[i] for e in extra_tfstruct],
-                            axis=1)
-                        concat_values = tf.concat(
-                            [values,] + [e.values[i] for e in extra_tfstruct],
-                            axis=1)
+                    def true_fn():
+                        if isinstance(extra_tfstruct, TransformerStruct):
+                            concat_keys = tf.concat(
+                                [keys, extra_tfstruct.keys[i]],
+                                axis=1)
+                            concat_values = tf.concat(
+                                [values, extra_tfstruct.values[i]],
+                                axis=1)
+                        else:
+                            concat_keys = tf.concat(
+                                [keys,] + [e.keys[i] for e in extra_tfstruct],
+                                axis=1)
+                            concat_values = tf.concat(
+                                [values,] + [e.values[i] for e in extra_tfstruct],
+                                axis=1)
+                        return concat_keys, concat_values
+
                     keys, values = tf.cond(
                         tf.greater(extra_length, 0),
-                        lambda: (concat_keys, concat_values),
+                        true_fn,
                         lambda: (keys, values))
 
                 attn_feat = attention_simple(querys, keys, values,
