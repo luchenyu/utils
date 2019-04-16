@@ -1879,9 +1879,11 @@ def greedy_dec(length,
         start_id: 0-dim or 1-dim tf.int32
     """
 
-    batch_size = tf.shape(initial_state[0])[0] \
-        if isinstance(initial_state, tuple) else \
-        tf.shape(initial_state)[0]
+    flatten_state = flatten_structure(initial_state)
+    for item in flatten_state:
+        if isinstance(item, tf.Tensor):
+            batch_size = tf.shape(item)[0]
+            break
     inputs = tf.tile(tf.expand_dims(start_embedding, axis=0), [batch_size, 1])
     state = initial_state
     paths = tf.expand_dims(tf.expand_dims(start_id, axis=0), axis=1)
@@ -1986,9 +1988,11 @@ def stochastic_dec(length,
         start_id: 0-dim or 1-dim tf.int32
     """
 
-    batch_size = tf.shape(initial_state[0])[0] \
-        if isinstance(initial_state, tuple) else \
-        tf.shape(initial_state)[0]
+    flatten_state = flatten_structure(initial_state)
+    for item in flatten_state:
+        if isinstance(item, tf.Tensor):
+            batch_size = tf.shape(item)[0]
+            break
     inputs = tf.tile(tf.expand_dims(start_embedding, axis=0), [batch_size*num_candidates, 1])
     beam_parent = tf.reshape(
         tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1, num_candidates]),
@@ -2101,9 +2105,11 @@ def beam_dec(length,
         start_id: 0-dim or 1-dim tf.int32
     """
 
-    batch_size = tf.shape(initial_state[0])[0] \
-        if isinstance(initial_state, tuple) else \
-        tf.shape(initial_state)[0]
+    flatten_state = flatten_structure(initial_state)
+    for item in flatten_state:
+        if isinstance(item, tf.Tensor):
+            batch_size = tf.shape(item)[0]
+            break
     inputs = tf.tile(tf.expand_dims(start_embedding, axis=0), [batch_size*beam_size, 1])
     beam_parent = tf.reshape(
         tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1, beam_size]),
@@ -2264,9 +2270,11 @@ def stochastic_beam_dec(length,
         start_id: 0-dim or 1-dim tf.int32
     """
 
-    batch_size = tf.shape(initial_state[0])[0] \
-        if isinstance(initial_state, tuple) else \
-        tf.shape(initial_state)[0]
+    flatten_state = flatten_structure(initial_state)
+    for item in flatten_state:
+        if isinstance(item, tf.Tensor):
+            batch_size = tf.shape(item)[0]
+            break
     inputs = tf.tile(tf.expand_dims(start_embedding, axis=0), [batch_size*beam_size, 1])
     beam_parent = tf.reshape(
         tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1, beam_size]),
@@ -2331,17 +2339,25 @@ def stochastic_beam_dec(length,
         # open
         open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
         open_scores = tf.reshape(open_scores, [batch_size, -1])
-        top_scores, top_indices = tf.nn.top_k(open_scores, beam_size)
-        scores = tf.reshape(top_scores, [-1])
+        sample_indices = tf.random.categorical(
+            open_scores,
+            beam_size, dtype=tf.int32)
+        batch_indices = tf.stack(
+            [tf.tile(
+                tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1),
+                [1, beam_size]), sample_indices],
+            axis=2)
+        sample_scores = tf.gather_nd(open_scores, batch_indices)
+        scores = tf.reshape(sample_scores, [-1])
 
         # gather beam parent
-        beam_parent = tf.floor_div(top_indices, (vocab_size-1))
+        beam_parent = tf.floor_div(sample_indices, (vocab_size-1))
         beam_parent = tf.reshape(tf.expand_dims(tf.range(batch_size)*beam_size, 1)+beam_parent, [-1])
         state = gather_state(state, beam_parent)
         paths = tf.gather(paths, beam_parent)
 
         # next
-        indices = tf.floormod(top_indices, (vocab_size-1))
+        indices = tf.floormod(sample_indices, (vocab_size-1))
         indices = tf.reshape(indices, [-1])
         batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
         if len(candidate_embeds.get_shape()) == 2:
@@ -2399,100 +2415,6 @@ def stochastic_beam_dec(length,
     chosen_scores = tf.gather_nd(closed_scores, batch_chosen_indices)
 
     return chosen_paths, chosen_scores
-
-
-### Copy Mechanism ###
-
-def make_logit_fn(vocab_embedding,
-                  copy_ids=None,
-                  is_training=True):
-    """implements logit function with copy mechanism
-
-    """
-
-    if copy_ids == None:
-        def logit_fn(outputs):
-            size = vocab_embedding.get_shape()[-1].value
-            outputs_vocab = fully_connected(outputs,
-                                           size+16,
-                                           is_training=is_training,
-                                           scope="proj")
-            outputs_vocab_main, outputs_vocab_norm = tf.split(
-                outputs_vocab,
-                [size, 16],
-                axis=-1)
-            outputs_vocab_main = tf.stack(
-                tf.split(outputs_vocab_main, 16, axis=-1), axis=-2)
-            outputs_vocab_main = tf.nn.l2_normalize(outputs_vocab_main, -1)
-            outputs_vocab = outputs_vocab_main * tf.nn.relu(
-                tf.expand_dims(outputs_vocab_norm, axis=-1))
-            outputs_vocab = tf.concat(
-                tf.unstack(outputs_vocab, axis=-2),
-                axis=-1)
-            logits_vocab = tf.reshape(
-                tf.matmul(tf.reshape(outputs_vocab,
-                                     [-1, size]),
-                          tf.transpose(vocab_embedding)),
-                tf.concat([tf.shape(outputs)[:-1],
-                           tf.constant(-1, shape=[1])], 0))
-            return logits_vocab
-    else:
-        def logit_fn(outputs):
-            batch_size = tf.shape(copy_ids[0])[0]
-            size = vocab_embedding.get_shape()[-1].value
-            vocab_size = vocab_embedding.get_shape()[0].value
-            outputs, copy_logits = outputs
-            assert(len(copy_ids) == len(copy_logits))
-            outputs_vocab = fully_connected(outputs,
-                                           size+16,
-                                           is_training=is_training,
-                                           scope="proj")
-            outputs_vocab_main, outputs_vocab_norm = tf.split(
-                outputs_vocab,
-                [size, 16],
-                axis=-1)
-            outputs_vocab_main = tf.stack(
-                tf.split(outputs_vocab_main, 16, axis=-1), axis=-2)
-            outputs_vocab_main = tf.nn.l2_normalize(outputs_vocab_main, -1)
-            outputs_vocab = outputs_vocab_main * tf.nn.relu(
-                tf.expand_dims(outputs_vocab_norm, axis=-1))
-            outputs_vocab = tf.concat(
-                tf.unstack(outputs_vocab, axis=-2),
-                axis=-1)
-            if outputs.get_shape().ndims == 3:
-                beam_size = outputs.get_shape()[1].value
-                logits_vocab = tf.reshape(
-                    tf.matmul(tf.reshape(outputs_vocab,
-                                         [-1, size]),
-                              tf.transpose(vocab_embedding)),
-                    [batch_size, beam_size, vocab_size])
-            else:
-                assert(outputs.get_shape().ndims == 2)
-                logits_vocab = tf.reshape(
-                    tf.matmul(
-                        outputs_vocab,
-                        tf.transpose(vocab_embedding)),
-                    [batch_size, -1, vocab_size])
-            beam_size = tf.shape(logits_vocab)[1]
-            logits = logits_vocab
-            for i in range(len(copy_ids)):
-                length = copy_ids[i].get_shape()[1].value
-                data = tf.reshape(copy_logits[i], [batch_size, beam_size, length])
-                batch_idx = tf.tile(
-                    tf.expand_dims(tf.expand_dims(tf.range(batch_size), 1), 2),
-                    [1, beam_size, length])
-                beam_idx = tf.tile(
-                    tf.expand_dims(tf.expand_dims(tf.range(beam_size), 0), 2),
-                    [batch_size, 1, length])
-                vocab_idx = tf.tile(
-                    tf.expand_dims(copy_ids[i], 1),
-                    [1, beam_size, 1])
-                indices = tf.stack([batch_idx, beam_idx, vocab_idx], axis=-1)
-                logits += tf.scatter_nd(indices, data, tf.shape(logits))
-            if outputs.get_shape().ndims == 2:
-                logits = tf.reshape(logits, [-1, vocab_size])
-            return logits
-    return logit_fn
 
 
 ### Miscellaneous ###
@@ -2704,6 +2626,22 @@ def unique_vector(x):
     unique_x=tf.gather(x,r_cond_mul4)
 
     return unique_x, r_cond_mul4
+
+def pad_vectors(vector_list):
+    """
+    pad a list of vectors to same size in last dim
+    """
+    if len(vector_list) <= 1:
+        return vector_list
+    else:
+        max_size = tf.reduce_max(tf.stack([tf.shape(v)[-1] for v in vector_list], axis=0))
+        for i, v in enumerate(vector_list):
+            num_dim = len(v.get_shape())
+            vector_list[i] = tf.cond(
+                tf.less(tf.shape(v)[-1], max_size),
+                lambda: tf.pad(v, [[0,0],]*(num_dim-1)+[[0,max_size-tf.shape(v)[-1]]]),
+                lambda: v)
+        return vector_list
 
 def flatten_structure(struct):
     """flatten a possibly nested struct into a list"""
