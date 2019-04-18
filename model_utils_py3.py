@@ -2310,12 +2310,19 @@ def stochastic_beam_dec(length,
             closed_scores: batch_size x current_length
         """
         cur_len = tf.shape(paths)[1]
+        cur_len_fp32 = tf.cast(cur_len, tf.float32)
+        gamma = tf.minimum((cur_len_fp32-1.0)/32.0, 1.0)
+        alpha = 1.0 / cur_len_fp32
+        beta = 1.0 - alpha
+        alpha = tf.pow(alpha, gamma)
+        beta = tf.pow(beta, gamma)
 
         # iter
         outputs, state = cell(inputs, state)
         candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
         vocab_size = tf.shape(logits)[1]
         log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
+        scores *= beta
 
         # closing mask
         closing_masks = tf.math.in_top_k(
@@ -2324,7 +2331,7 @@ def stochastic_beam_dec(length,
             beam_size)
 
         # closed scores
-        closing_scores = (log_probs[:,0] + scores) / tf.cast(cur_len, tf.float32)
+        closing_scores = log_probs[:,0]*alpha + scores
         closing_scores += tf.log(tf.cast(closing_masks, tf.float32))
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
 
@@ -2337,7 +2344,7 @@ def stochastic_beam_dec(length,
         closed_paths = tf.concat([closed_paths, tf.expand_dims(closing_paths, axis=1)], axis=1)
 
         # open
-        open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
+        open_scores = log_probs[:, 1:]*alpha + tf.expand_dims(scores, axis=1)
         open_scores = tf.reshape(open_scores, [batch_size, -1])
         sample_indices = tf.random.categorical(
             open_scores,
