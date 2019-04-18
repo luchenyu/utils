@@ -2250,7 +2250,8 @@ def stochastic_beam_dec(length,
                         start_embedding,
                         start_id,
                         beam_size=16,
-                        num_candidates=1):
+                        num_candidates=1,
+                        gamma=4):
     """
     A stochastic beam decoder.
     args:
@@ -2311,7 +2312,6 @@ def stochastic_beam_dec(length,
         """
         cur_len = tf.shape(paths)[1]
         cur_len_fp32 = tf.cast(cur_len, tf.float32)
-        gamma = 16.0
         beta = 1.0 / (1.0 - math.exp(-1.0/gamma))
         alpha = beta * (1.0 - tf.exp((-cur_len_fp32) / gamma)) / cur_len_fp32
 
