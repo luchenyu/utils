@@ -2311,11 +2311,12 @@ def stochastic_beam_dec(length,
         """
         cur_len = tf.shape(paths)[1]
         cur_len_fp32 = tf.cast(cur_len, tf.float32)
-        gamma = tf.minimum((cur_len_fp32-1.0)/32.0, 1.0)
-        alpha = 1.0 / cur_len_fp32
-        beta = 1.0 - alpha
-        alpha = tf.pow(alpha, gamma)
-        beta = tf.pow(beta, gamma)
+        gamma = 32.0
+        inc = tf.exp((1.0 - cur_len_fp32) / gamma)
+        accm = (1.0 - inc) / (1.0 - math.exp(-1.0/gamma))+1e-12
+        alpha = (inc+accm) / cur_len_fp32
+        beta = ((cur_len_fp32 - 1.0) / accm) * alpha
+
 
         # iter
         outputs, state = cell(inputs, state)
