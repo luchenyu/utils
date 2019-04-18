@@ -2251,6 +2251,7 @@ def stochastic_beam_dec(length,
                         start_id,
                         beam_size=16,
                         num_candidates=1,
+                        cutoff_size=128,
                         gamma=4):
     """
     A stochastic beam decoder.
@@ -2325,7 +2326,7 @@ def stochastic_beam_dec(length,
         closing_masks = tf.math.in_top_k(
             log_probs,
             tf.zeros([batch_size*beam_size], dtype=tf.int32),
-            beam_size)
+            cutoff_size)
 
         # closed scores
         closing_scores = (log_probs[:,0] + scores) * alpha
