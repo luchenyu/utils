@@ -2251,7 +2251,7 @@ def stochastic_beam_dec(length,
                         start_id,
                         beam_size=16,
                         num_candidates=1,
-                        cutoff_size=128,
+                        cutoff_size=16,
                         gamma=4):
     """
     A stochastic beam decoder.
@@ -2585,52 +2585,75 @@ def match_vector(x, y):
     return:
         match_matrix: batch_size x length1 x length2 or lengh1 x length2, bool
     """
-    match_matrix = tf.equal(
-        tf.expand_dims(x, axis=-2),
-        tf.expand_dims(y, axis=-3))
-    match_matrix = tf.reduce_all(match_matrix, axis=-1)
-    return match_matrix
+    assert(len(x.get_shape()) == len(y.get_shape()))
+    if len(x.get_shape()) == 0:
+        return tf.equal(x, y)
+    else:
+        if len(x.get_shape()) == 1:
+            match_matrix = tf.equal(
+                tf.expand_dims(x, axis=-1),
+                tf.expand_dims(y, axis=-2))
+        else:
+            match_matrix = tf.equal(
+                tf.expand_dims(x, axis=-2),
+                tf.expand_dims(y, axis=-3))
+            match_matrix = tf.reduce_all(match_matrix, axis=-1)
+        return match_matrix
 
-def unique_vector(x):
+def unique_vector(x, mode='first'):
     """
+    select unique vector
     args:
         x: num_vectors x vector_dim
+        mode: 'first'|'random'
     returns:
         unique elems of x
         indices in x of the unique elems
     """
-    x_shape=tf.shape(x) #(3,2)
-    x1=tf.tile(x,[1,x_shape[0]]) #[[1,2],[1,2],[1,2],[3,4],[3,4],[3,4]..]
-    x2=tf.tile(x,[x_shape[0],1]) #[[1,2],[1,2],[1,2],[3,4],[3,4],[3,4]..]
+    length = tf.shape(x)[0]
+    masks = match_vector(x, x)
+    indices = tf.tile(
+        tf.expand_dims(tf.range(length, 0, -1, dtype=tf.int32), axis=0),
+        [length, 1])
+    masked_indices = tf.cast(masks, tf.int32) * indices
+    max_indices = tf.reduce_max(masked_indices, axis=1)
+    if mode == 'random':
+        sample_ids = tf.random.categorical(
+            tf.log(tf.cast(masks, tf.float32)), 1, dtype=tf.int32)
 
-    x1_2=tf.reshape(x1,[x_shape[0]*x_shape[0],x_shape[1]])
-    x2_2=tf.reshape(x2,[x_shape[0]*x_shape[0],x_shape[1]])
-    cond=tf.reduce_all(tf.equal(x1_2,x2_2),axis=1)
-    cond=tf.reshape(cond,[x_shape[0],x_shape[0]]) #reshaping cond to match x1_2 & x2_2
-    cond_shape=tf.shape(cond)
-    cond_cast=tf.cast(cond,tf.int32) #convertin condition boolean to int
-    cond_zeros=tf.zeros(cond_shape,tf.int32) #replicating condition tensor into all 0's
+    unique_max_indices, unique_ids = tf.unique(max_indices)
+    if mode == 'first':
+        select_indices = length - unique_max_indices
+    elif mode == 'random':
+        select_indices = tf.gather(sample_ids, unique_ids)
 
-    #CREATING RANGE TENSOR
-    r=tf.range(x_shape[0])
-    r=tf.add(tf.tile(r,[x_shape[0]]),1)
-    r=tf.reshape(r,[x_shape[0],x_shape[0]])
+    unique_x = tf.gather(x, select_indices)
 
-    #converting TRUE=1 FALSE=MAX(index)+1 (which is invalid by default) so when we take min it wont get selected & in end we will only take values <max(indx).
-    f1 = tf.multiply(tf.ones(cond_shape,tf.int32),x_shape[0]+1)
-    f2 =tf.ones(cond_shape,tf.int32)
-    cond_cast2 = tf.where(tf.equal(cond_cast,cond_zeros),f1,f2) #if false make it max_index+1 else keep it 1
+    return unique_x, select_indices
 
-    #multiply range with new int boolean mask
-    r_cond_mul=tf.multiply(r,cond_cast2)
-    r_cond_mul2=tf.reduce_min(r_cond_mul,axis=1)
-    r_cond_mul3,unique_idx=tf.unique(r_cond_mul2)
-    r_cond_mul4=tf.subtract(r_cond_mul3,1)
+def mask_unique_vector(x, masks):
+    """
+    mask the unique vectors in the vector_array, random select
+    args:
+        x: some shape x vector_dim
+        masks: some shape
+    return:
+        unique_masks: some_shape
+    """
+    batch_shape = tf.shape(x)[:len(masks.get_shape())]
+    flatten_masks = tf.reshape(masks, [-1])
+    bulk_size = tf.shape(flatten_masks)[0]
+    flatten_indices = tf.range(bulk_size)
+    valid_x = tf.boolean_mask(x, masks)
+    valid_indices = tf.boolean_mask(flatten_indices, flatten_masks)
+    unique_x, unique_idx = unique_vector(valid_x, mode='random')
+    unique_indices = tf.gather(valid_indices, unique_idx)
+    unique_onehots = tf.one_hot(
+        unique_indices, bulk_size, on_value=True, off_value=False)
+    unique_masks = tf.reduce_any(unique_onehots, axis=0)
+    unique_masks = tf.reshape(unique_masks, batch_shape)
 
-    #get actual values from unique indexes
-    unique_x=tf.gather(x,r_cond_mul4)
-
-    return unique_x, r_cond_mul4
+    return unique_masks
 
 def pad_vectors(vector_list):
     """
