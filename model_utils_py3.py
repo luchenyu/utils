@@ -2640,18 +2640,25 @@ def mask_unique_vector(x, masks):
     return:
         unique_masks: some_shape
     """
-    batch_shape = tf.shape(x)[:len(masks.get_shape())]
-    flatten_masks = tf.reshape(masks, [-1])
-    bulk_size = tf.shape(flatten_masks)[0]
-    flatten_indices = tf.range(bulk_size)
-    valid_x = tf.boolean_mask(x, masks)
-    valid_indices = tf.boolean_mask(flatten_indices, flatten_masks)
-    unique_x, unique_idx = unique_vector(valid_x, mode='random')
-    unique_indices = tf.gather(valid_indices, unique_idx)
-    unique_onehots = tf.one_hot(
-        unique_indices, bulk_size, on_value=True, off_value=False)
-    unique_masks = tf.reduce_any(unique_onehots, axis=0)
-    unique_masks = tf.reshape(unique_masks, batch_shape)
+    def true_fn():
+        batch_shape = tf.shape(x)[:len(masks.get_shape())]
+        flatten_masks = tf.reshape(masks, [-1])
+        bulk_size = tf.shape(flatten_masks)[0]
+        flatten_indices = tf.range(bulk_size)
+        valid_x = tf.boolean_mask(x, masks)
+        valid_indices = tf.boolean_mask(flatten_indices, flatten_masks)
+        unique_x, unique_idx = unique_vector(valid_x, mode='random')
+        unique_indices = tf.gather(valid_indices, unique_idx)
+        unique_onehots = tf.one_hot(
+            unique_indices, bulk_size, on_value=True, off_value=False)
+        unique_masks = tf.reduce_any(unique_onehots, axis=0)
+        unique_masks = tf.reshape(unique_masks, batch_shape)
+        return unique_masks
+
+    unique_masks = tf.cond(
+        tf.reduce_any(masks),
+        true_fn,
+        lambda: masks)
 
     return unique_masks
 
