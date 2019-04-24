@@ -2346,14 +2346,25 @@ def stochastic_beam_dec(length,
         open_scores = tf.reshape(open_scores, [batch_size, -1])
         sample_indices = tf.random.categorical(
             open_scores * alpha,
-            beam_size, dtype=tf.int32)
+            4*beam_size, dtype=tf.int32)
         batch_indices = tf.stack(
             [tf.tile(
                 tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1),
-                [1, beam_size]), sample_indices],
+                [1, 4*beam_size]), sample_indices],
             axis=2)
+        unique_masks = mask_unique_vector(
+            batch_indices,
+            tf.ones([batch_size, 4*beam_size], dtype=tf.bool))
         sample_scores = tf.gather_nd(open_scores, batch_indices)
-        scores = tf.reshape(sample_scores, [-1])
+        sample_scores += tf.log(tf.cast(unique_masks, tf.float32))
+        top_scores, top_indices = tf.math.top_k(sample_scores, beam_size)
+        batch_indices = tf.stack(
+            [tf.tile(
+                tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1),
+                [1, beam_size]), top_indices],
+            axis=2)
+        sample_indices = tf.gather_nd(sample_indices, batch_indices)
+        scores = tf.reshape(top_scores, [-1])
 
         # gather beam parent
         beam_parent = tf.floor_div(sample_indices, (vocab_size-1))
@@ -2411,13 +2422,12 @@ def stochastic_beam_dec(length,
     else:
         closed_paths = tf.reshape(
             closed_paths, [batch_size, beam_size*length, length+1, tf.shape(closed_paths)[3]])
-    chosen_indices = tf.random.categorical(closed_scores, num_candidates, dtype=tf.int32)
+    chosen_scores, chosen_indices = tf.math.top_k(closed_scores, num_candidates)
     batch_chosen_indices = tf.stack(
         [tf.tile(tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1), [1, num_candidates]),
          chosen_indices],
         axis=2)
     chosen_paths = tf.gather_nd(closed_paths, batch_chosen_indices)
-    chosen_scores = tf.gather_nd(closed_scores, batch_chosen_indices)
 
     return chosen_paths, chosen_scores
 
