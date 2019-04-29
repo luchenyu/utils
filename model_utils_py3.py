@@ -16,6 +16,7 @@ import numpy as np
 import math
 from collections import namedtuple, Iterable
 import tensorflow as tf
+import tensorflow_probability as tfp
 from tensorflow.python.util import nest
 
 ### Building Blocks ###
@@ -2085,7 +2086,9 @@ def beam_dec(length,
              start_embedding,
              start_id,
              beam_size=16,
-             num_candidates=1):
+             num_candidates=1,
+             cutoff_rate=0.1,
+             gamma=8.0):
     """
     A beam decoder.
     args:
@@ -2128,7 +2131,7 @@ def beam_dec(length,
             tf.expand_dims(tf.expand_dims(start_id, axis=0), axis=1), [batch_size*beam_size,1,1])
     scores = tf.concat(
         [tf.ones([batch_size, 1]), tf.zeros([batch_size, beam_size-1])], axis=1)
-    scores = tf.reshape(tf.log(scores), [batch_size*beam_size])
+    scores = tf.reshape(tf.maximum(tf.log(scores), -999.0), [batch_size*beam_size])
     closed_scores = tf.zeros([batch_size*beam_size, 0])
 
     def cond(inputs, state, paths, scores, closed_paths, closed_scores):
@@ -2145,22 +2148,30 @@ def beam_dec(length,
             closed_scores: batch_size x current_length
         """
         cur_len = tf.shape(paths)[1]
+        cur_len_fp32 = tf.cast(cur_len, tf.float32)
 
         # iter
         outputs, state = cell(inputs, state)
         candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
         vocab_size = tf.shape(logits)[1]
-        log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
+        candidate_masks = tf.cast(candidate_masks, tf.float32)
+        logits *= candidate_masks
+        log_probs = logits + tf.maximum(tf.log(candidate_masks), -999.0)
 
         # closing mask
+        cutoff_size = tf.cast(
+            cutoff_rate*tf.cast(vocab_size, tf.float32),
+            tf.int32)
+        cutoff_size =tf.maximum(2, cutoff_size)
         closing_masks = tf.math.in_top_k(
             log_probs,
             tf.zeros([batch_size*beam_size], dtype=tf.int32),
-            beam_size)
+            cutoff_size)
 
         # closed scores
-        closing_scores = (log_probs[:,0] + scores) / tf.cast(cur_len, tf.float32)
-        closing_scores += tf.log(tf.cast(closing_masks, tf.float32))
+        closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
+        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / gamma, 1.0)), -999.0)
+        closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
 
         # closed paths
@@ -2171,10 +2182,23 @@ def beam_dec(length,
             closing_paths = tf.pad(closing_paths, [[0,0],[0,length-cur_len],[0,0]])
         closed_paths = tf.concat([closed_paths, tf.expand_dims(closing_paths, axis=1)], axis=1)
 
-        # open
+        # penalize repeat and choose top k
+        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
+        match_scale = tf.reduce_sum(
+            1.0 / tf.reduce_sum(match_matrix, axis=2),
+            axis=1, keepdims=True) / cur_len_fp32
+        repeat_penalty = tf.log(match_scale)
         open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
+        penalized_scores = open_scores / cur_len_fp32 + repeat_penalty
         open_scores = tf.reshape(open_scores, [batch_size, -1])
-        top_scores, top_indices = tf.math.top_k(open_scores, beam_size)
+        penalized_scores = tf.reshape(penalized_scores, [batch_size, -1])
+        _, top_indices = tf.math.top_k(penalized_scores, beam_size)
+        batch_indices = tf.stack(
+            [tf.tile(
+                tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1),
+                [1, beam_size]), top_indices],
+            axis=2)
+        top_scores = tf.gather_nd(open_scores, batch_indices)
         scores = tf.reshape(top_scores, [-1])
 
         # gather beam parent
@@ -2251,7 +2275,7 @@ def stochastic_beam_dec(length,
                         start_id,
                         beam_size=16,
                         num_candidates=1,
-                        cutoff_size=16,
+                        cutoff_rate=0.1,
                         gamma=4):
     """
     A stochastic beam decoder.
@@ -2295,8 +2319,10 @@ def stochastic_beam_dec(length,
             tf.expand_dims(tf.expand_dims(start_id, axis=0), axis=1), [batch_size*beam_size,1,1])
     scores = tf.concat(
         [tf.ones([batch_size, 1]), tf.zeros([batch_size, beam_size-1])], axis=1)
-    scores = tf.reshape(tf.log(scores), [batch_size*beam_size])
+    scores = tf.reshape(tf.maximum(tf.log(scores), -999.0), [batch_size*beam_size])
     closed_scores = tf.zeros([batch_size*beam_size, 0])
+
+    exp_dist = tfp.distributions.Exponential(2.0)
 
     def cond(inputs, state, paths, scores, closed_paths, closed_scores):
         return tf.constant(True, dtype=tf.bool)
@@ -2314,23 +2340,30 @@ def stochastic_beam_dec(length,
         cur_len = tf.shape(paths)[1]
         cur_len_fp32 = tf.cast(cur_len, tf.float32)
         beta = 1.0 / (1.0 - math.exp(-1.0/gamma))
-        alpha = beta * (1.0 - tf.exp((-cur_len_fp32) / gamma)) / cur_len_fp32
+        alpha = beta * (1.0 - tf.exp((-cur_len_fp32) / gamma))
 
         # iter
         outputs, state = cell(inputs, state)
         candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
         vocab_size = tf.shape(logits)[1]
-        log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
+        candidate_masks = tf.cast(candidate_masks, tf.float32)
+        logits *= candidate_masks
+        log_probs = logits + tf.maximum(tf.log(candidate_masks), -999.0)
 
         # closing mask
+        cutoff_size = tf.cast(
+            cutoff_rate*tf.cast(vocab_size, tf.float32),
+            tf.int32)
+        cutoff_size =tf.maximum(2, cutoff_size)
         closing_masks = tf.math.in_top_k(
             log_probs,
             tf.zeros([batch_size*beam_size], dtype=tf.int32),
             cutoff_size)
 
         # closed scores
-        closing_scores = (log_probs[:,0] + scores) * alpha
-        closing_scores += tf.log(tf.cast(closing_masks, tf.float32))
+        closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
+        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / gamma, 1.0)), -999.0)
+        closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
 
         # closed paths
@@ -2341,30 +2374,26 @@ def stochastic_beam_dec(length,
             closing_paths = tf.pad(closing_paths, [[0,0],[0,length-cur_len],[0,0]])
         closed_paths = tf.concat([closed_paths, tf.expand_dims(closing_paths, axis=1)], axis=1)
 
-        # open
+        # penalize repeat, add random logits and then sample top k
+        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
+        match_scale = tf.reduce_sum(
+            1.0 / tf.reduce_sum(match_matrix, axis=2),
+            axis=1, keepdims=True) / cur_len_fp32
+        repeat_penalty = tf.log(match_scale)
         open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
+        penalized_scores = open_scores / cur_len_fp32 + repeat_penalty
         open_scores = tf.reshape(open_scores, [batch_size, -1])
-        sample_indices = tf.random.categorical(
-            open_scores * alpha,
-            4*beam_size, dtype=tf.int32)
+        penalized_scores = tf.reshape(penalized_scores, [batch_size, -1])
+        noisy_scores = penalized_scores*alpha + exp_dist.sample(
+            tf.shape(open_scores))
+        _, sample_indices = tf.math.top_k(noisy_scores, beam_size)
         batch_indices = tf.stack(
             [tf.tile(
                 tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1),
-                [1, 4*beam_size]), sample_indices],
+                [1, beam_size]), sample_indices],
             axis=2)
-        unique_masks = mask_unique_vector(
-            batch_indices,
-            tf.ones([batch_size, 4*beam_size], dtype=tf.bool))
         sample_scores = tf.gather_nd(open_scores, batch_indices)
-        sample_scores += tf.log(tf.cast(unique_masks, tf.float32))
-        top_scores, top_indices = tf.math.top_k(sample_scores, beam_size)
-        batch_indices = tf.stack(
-            [tf.tile(
-                tf.expand_dims(tf.range(batch_size, dtype=tf.int32), axis=1),
-                [1, beam_size]), top_indices],
-            axis=2)
-        sample_indices = tf.gather_nd(sample_indices, batch_indices)
-        scores = tf.reshape(top_scores, [-1])
+        scores = tf.reshape(sample_scores, [-1])
 
         # gather beam parent
         beam_parent = tf.floor_div(sample_indices, (vocab_size-1))
