@@ -2168,8 +2168,16 @@ def beam_dec(length,
             tf.zeros([batch_size*beam_size], dtype=tf.int32),
             cutoff_size)
 
+        # penalize repeat
+        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
+        match_scale = tf.reduce_sum(
+            1.0 / tf.reduce_sum(match_matrix, axis=2),
+            axis=1, keepdims=True) / cur_len_fp32
+        repeat_penalty = tf.log(match_scale)
+
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
+        closing_scores += tf.squeeze(repeat_penalty, [1])
         closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / gamma, 1.0)), -999.0)
         closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
@@ -2182,12 +2190,7 @@ def beam_dec(length,
             closing_paths = tf.pad(closing_paths, [[0,0],[0,length-cur_len],[0,0]])
         closed_paths = tf.concat([closed_paths, tf.expand_dims(closing_paths, axis=1)], axis=1)
 
-        # penalize repeat and choose top k
-        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
-        match_scale = tf.reduce_sum(
-            1.0 / tf.reduce_sum(match_matrix, axis=2),
-            axis=1, keepdims=True) / cur_len_fp32
-        repeat_penalty = tf.log(match_scale)
+        # choose top k
         open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
         penalized_scores = open_scores / cur_len_fp32 + repeat_penalty
         open_scores = tf.reshape(open_scores, [batch_size, -1])
@@ -2360,8 +2363,16 @@ def stochastic_beam_dec(length,
             tf.zeros([batch_size*beam_size], dtype=tf.int32),
             cutoff_size)
 
+        # penalize repeat
+        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
+        match_scale = tf.reduce_sum(
+            1.0 / tf.reduce_sum(match_matrix, axis=2),
+            axis=1, keepdims=True) / cur_len_fp32
+        repeat_penalty = tf.log(match_scale)
+
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
+        closing_scores += tf.squeeze(repeat_penalty, [1])
         closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / gamma, 1.0)), -999.0)
         closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
@@ -2374,12 +2385,7 @@ def stochastic_beam_dec(length,
             closing_paths = tf.pad(closing_paths, [[0,0],[0,length-cur_len],[0,0]])
         closed_paths = tf.concat([closed_paths, tf.expand_dims(closing_paths, axis=1)], axis=1)
 
-        # penalize repeat, add random logits and then sample top k
-        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
-        match_scale = tf.reduce_sum(
-            1.0 / tf.reduce_sum(match_matrix, axis=2),
-            axis=1, keepdims=True) / cur_len_fp32
-        repeat_penalty = tf.log(match_scale)
+        # add random logits and then sample top k
         open_scores = log_probs[:, 1:] + tf.expand_dims(scores, axis=1)
         penalized_scores = open_scores / cur_len_fp32 + repeat_penalty
         open_scores = tf.reshape(open_scores, [batch_size, -1])
