@@ -2169,7 +2169,12 @@ def beam_dec(length,
             cutoff_size)
 
         # penalize repeat
-        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
+        if len(paths.get_shape()) == 2:
+            paths_to_match = tf.expand_dims(paths, axis=2)
+        else:
+            paths_to_match = paths
+        match_matrix = tf.cast(
+            match_vector(paths_to_match, paths_to_match), tf.float32)
         match_scale = tf.reduce_sum(
             1.0 / tf.reduce_sum(match_matrix, axis=2),
             axis=1, keepdims=True) / cur_len_fp32
@@ -2364,7 +2369,12 @@ def stochastic_beam_dec(length,
             cutoff_size)
 
         # penalize repeat
-        match_matrix = tf.cast(match_vector(paths, paths), tf.float32)
+        if len(paths.get_shape()) == 2:
+            paths_to_match = tf.expand_dims(paths, axis=2)
+        else:
+            paths_to_match = paths
+        match_matrix = tf.cast(
+            match_vector(paths_to_match, paths_to_match), tf.float32)
         match_scale = tf.reduce_sum(
             1.0 / tf.reduce_sum(match_matrix, axis=2),
             axis=1, keepdims=True) / cur_len_fp32
