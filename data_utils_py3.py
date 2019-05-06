@@ -106,20 +106,17 @@ class MolecularVocab(Vocab):
     Typically vocab of words
     with special tokens [<PAD>] and optional [<SEP>, <UNK>] at the beginning
     """
-    def __init__(self, atomic_vocab, filename=None, special_tokens=[],
-                 has_sep=False, has_unk=False):
+    def __init__(self, atomic_vocab, filename=None, special_tokens=[]):
         self.atomic_vocab = atomic_vocab
         self.pad, self.sep, self.unk = '<PAD>', None, None
-        if has_unk:
-            self.unk = '<UNK>'
-            special_tokens = [self.unk]+special_tokens
-        if has_sep:
-            self.sep = '<SEP>'
-            special_tokens = [self.sep]+special_tokens
         special_token_dict = {self.pad: 0}
         for i, tok in enumerate(special_tokens):
             special_token_dict[tok] = i+1
         Vocab.__init__(self, filename, special_token_dict)
+        if '<UNK>' in self.values():
+            self.unk = '<UNK>'
+        if '<SEP>' in self. values():
+            self.sep = '<SEP>'
         self.decompose_table = None
         self.update_decompose_table()
 
