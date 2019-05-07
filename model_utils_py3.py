@@ -966,7 +966,7 @@ def attention_simple(querys,
         logits = tf.pad(logits, [[0,0], [0,0], [0,0], [1,0]])
         weights = tf.pad(weights, [[0,0], [0,0], [0,0], [1,0]], constant_values=1.0)
 
-        probs = tf.exp(logits) * weights
+        probs = tf.nn.softmax(logits) * weights
         probs_sum = tf.reduce_sum(probs, axis=-1, keepdims=True)
         probs = probs[:,:,:,1:]
         attn_feats = tf.matmul(probs, values) / probs_sum
