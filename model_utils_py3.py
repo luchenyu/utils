@@ -2088,7 +2088,7 @@ def beam_dec(length,
              beam_size=16,
              num_candidates=1,
              cutoff_rate=0.1,
-             gamma=8.0):
+             min_length=1):
     """
     A beam decoder.
     args:
@@ -2183,7 +2183,7 @@ def beam_dec(length,
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
         closing_scores += tf.squeeze(repeat_penalty, [1])
-        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / gamma, 1.0)), -999.0)
+        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / float(min_length), 1.0)), -999.0)
         closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
 
@@ -2284,7 +2284,7 @@ def stochastic_beam_dec(length,
                         beam_size=16,
                         num_candidates=1,
                         cutoff_rate=0.1,
-                        gamma=4):
+                        min_length=1):
     """
     A stochastic beam decoder.
     args:
@@ -2347,8 +2347,8 @@ def stochastic_beam_dec(length,
         """
         cur_len = tf.shape(paths)[1]
         cur_len_fp32 = tf.cast(cur_len, tf.float32)
-        beta = 1.0 / (1.0 - math.exp(-1.0/gamma))
-        alpha = beta * (1.0 - tf.exp((-cur_len_fp32) / gamma))
+        beta = 1.0 / (1.0 - math.exp(-1.0/float(min_length)))
+        alpha = beta * (1.0 - tf.exp((-cur_len_fp32) / float(min_length)))
 
         # iter
         outputs, state = cell(inputs, state)
@@ -2383,7 +2383,7 @@ def stochastic_beam_dec(length,
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
         closing_scores += tf.squeeze(repeat_penalty, [1])
-        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / gamma, 1.0)), -999.0)
+        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / float(min_length), 1.0)), -999.0)
         closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
 
