@@ -2676,11 +2676,11 @@ def unique_vector(x, mode='first'):
         sample_ids = tf.random.categorical(
             tf.log(tf.cast(masks, tf.float32)), 1, dtype=tf.int32)
 
-    unique_max_indices, unique_ids = tf.unique(max_indices)
+    unique_max_indices, _ = tf.unique(max_indices)
     if mode == 'first':
         select_indices = length - unique_max_indices
     elif mode == 'random':
-        select_indices = tf.gather(sample_ids, unique_ids)
+        select_indices = tf.gather(sample_ids, length - unique_max_indices)
 
     unique_x = tf.gather(x, select_indices)
 
