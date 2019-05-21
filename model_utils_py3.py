@@ -2173,12 +2173,14 @@ def beam_dec(length,
             paths_to_match = tf.expand_dims(paths, axis=2)
         else:
             paths_to_match = paths
-        match_matrix = tf.cast(
-            match_vector(paths_to_match, paths_to_match), tf.float32)
-        match_scale = tf.reduce_sum(
-            1.0 / tf.reduce_sum(match_matrix, axis=2),
-            axis=1, keepdims=True) / cur_len_fp32
-        repeat_penalty = tf.log(match_scale)
+        repeat_masks = []
+        for ngram in [1,2,3]:
+            repeat_masks.append(mask_repeat(paths_to_match, ngram))
+        repeat_masks = tf.reduce_any(
+            tf.stack(repeat_masks, axis=2), axis=2)
+        repeat_ratio = tf.reduce_sum(
+            tf.cast(repeat_masks, tf.float32), axis=1, keepdims=True) / cur_len_fp32
+        repeat_penalty = tf.log(1.0-repeat_ratio)
 
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
@@ -2373,12 +2375,14 @@ def stochastic_beam_dec(length,
             paths_to_match = tf.expand_dims(paths, axis=2)
         else:
             paths_to_match = paths
-        match_matrix = tf.cast(
-            match_vector(paths_to_match, paths_to_match), tf.float32)
-        match_scale = tf.reduce_sum(
-            1.0 / tf.reduce_sum(match_matrix, axis=2),
-            axis=1, keepdims=True) / cur_len_fp32
-        repeat_penalty = tf.log(match_scale)
+        repeat_masks = []
+        for ngram in [1,2,3]:
+            repeat_masks.append(mask_repeat(paths_to_match, ngram))
+        repeat_masks = tf.reduce_any(
+            tf.stack(repeat_masks, axis=2), axis=2)
+        repeat_ratio = tf.reduce_sum(
+            tf.cast(repeat_masks, tf.float32), axis=1, keepdims=True) / cur_len_fp32
+        repeat_penalty = tf.log(1.0-repeat_ratio)
 
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
@@ -2716,6 +2720,36 @@ def mask_unique_vector(x, masks):
         lambda: masks)
 
     return unique_masks
+
+def mask_repeat(x, ngram=1):
+    """
+    mask repeat ngrams
+    args:
+        x: batch_size x length x vector_dim
+        ngram: int
+    return:
+        repeat_masks: batch_size x length
+    """
+    batch_size = tf.shape(x)[0]
+    length = tf.shape(x)[1]
+
+    x_padded = tf.pad(x, [[0,0],[0,ngram-1],[0,0]])
+    concat_x = []
+    for i in range(ngram):
+        concat_x.append(x_padded[:,i:i+length])
+    concat_x = tf.concat(concat_x, axis=2)
+    concat_x_padded = tf.pad(concat_x, [[0,0],[ngram,0],[0,0]])
+    ref_concat_x = concat_x_padded[:,ngram:ngram+length]
+    shift_concat_x = concat_x_padded[:,:length]
+    masks = tf.reduce_all(
+        tf.equal(ref_concat_x, shift_concat_x), axis=2)
+    masks_padded = tf.pad(masks, [[0,0],[ngram-1,0]])
+    concat_masks = []
+    for i in range(ngram):
+        concat_masks.append(masks_padded[:,i:i+length])
+    concat_masks = tf.stack(concat_masks, axis=2)
+    masks = tf.reduce_any(concat_masks, axis=2)
+    return masks
 
 def pad_vectors(vector_list):
     """
