@@ -2152,7 +2152,7 @@ def beam_dec(length,
 
         # iter
         outputs, state = cell(inputs, state)
-        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
+        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs, state)
         vocab_size = tf.shape(logits)[1]
         candidate_masks = tf.cast(candidate_masks, tf.float32)
         logits *= candidate_masks
@@ -2354,7 +2354,7 @@ def stochastic_beam_dec(length,
 
         # iter
         outputs, state = cell(inputs, state)
-        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
+        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs, state)
         vocab_size = tf.shape(logits)[1]
         candidate_masks = tf.cast(candidate_masks, tf.float32)
         logits *= candidate_masks
