@@ -2173,11 +2173,7 @@ def beam_dec(length,
             paths_to_match = tf.expand_dims(paths, axis=2)
         else:
             paths_to_match = paths
-        repeat_masks = []
-        for ngram in [1,2,3]:
-            repeat_masks.append(mask_repeat(paths_to_match, ngram))
-        repeat_masks = tf.reduce_any(
-            tf.stack(repeat_masks, axis=2), axis=2)
+        repeat_masks = mask_repeat(paths_to_match, 10)
         repeat_ratio = tf.reduce_sum(
             tf.cast(repeat_masks, tf.float32), axis=1, keepdims=True) / cur_len_fp32
         repeat_penalty = tf.log(1.0-repeat_ratio)
@@ -2375,11 +2371,7 @@ def stochastic_beam_dec(length,
             paths_to_match = tf.expand_dims(paths, axis=2)
         else:
             paths_to_match = paths
-        repeat_masks = []
-        for ngram in [1,2,3]:
-            repeat_masks.append(mask_repeat(paths_to_match, ngram))
-        repeat_masks = tf.reduce_any(
-            tf.stack(repeat_masks, axis=2), axis=2)
+        repeat_masks = mask_repeat(paths_to_match, 10)
         repeat_ratio = tf.reduce_sum(
             tf.cast(repeat_masks, tf.float32), axis=1, keepdims=True) / cur_len_fp32
         repeat_penalty = tf.log(1.0-repeat_ratio)
@@ -2721,7 +2713,7 @@ def mask_unique_vector(x, masks):
 
     return unique_masks
 
-def mask_repeat(x, ngram=1):
+def mask_repeat(x, span=5):
     """
     mask repeat ngrams
     args:
@@ -2732,24 +2724,19 @@ def mask_repeat(x, ngram=1):
     """
     batch_size = tf.shape(x)[0]
     length = tf.shape(x)[1]
+    dim = tf.shape(x)[2]
 
-    x_padded = tf.pad(x, [[0,0],[0,ngram-1],[0,0]])
-    concat_x = []
-    for i in range(ngram):
-        concat_x.append(x_padded[:,i:i+length])
-    concat_x = tf.concat(concat_x, axis=2)
-    concat_x_padded = tf.pad(concat_x, [[0,0],[ngram,0],[0,0]])
-    ref_concat_x = concat_x_padded[:,ngram:ngram+length]
-    shift_concat_x = concat_x_padded[:,:length]
-    masks = tf.reduce_all(
-        tf.equal(ref_concat_x, shift_concat_x), axis=2)
-    masks_padded = tf.pad(masks, [[0,0],[ngram-1,0]])
-    concat_masks = []
-    for i in range(ngram):
-        concat_masks.append(masks_padded[:,i:i+length])
-    concat_masks = tf.stack(concat_masks, axis=2)
-    masks = tf.reduce_any(concat_masks, axis=2)
-    return masks
+    x_padded = tf.pad(x, [[0,0],[span,0],[0,0]])
+    x_shifted = []
+    for i in range(span):
+        x_shifted.append(x_padded[:,i:i+length])
+    x_shifted = tf.stack(x_shifted, axis=2)
+    x = tf.reshape(x, [batch_size*length, 1, dim])
+    x_shifted = tf.reshape(x_shifted, [batch_size*length, span, dim])
+    match_matrix = match_vector(x, x_shifted)
+    repeat_masks = tf.reshape(
+        tf.reduce_any(match_matrix, axis=2), [batch_size, length])
+    return repeat_masks
 
 def pad_vectors(vector_list):
     """
