@@ -1,4 +1,3 @@
-
 import gensim, os, re, sys
 import numpy as np
 import unicodedata
@@ -16,12 +15,13 @@ class Vocab(gensim.corpora.Dictionary):
     def __init__(self, filename=None, special_token_dict=None):
         gensim.corpora.Dictionary.__init__(self)
         self.special_token_dict = special_token_dict
-        if special_token_dict != None:
-            self.token2id.update(special_token_dict)
-            self.patch_with_special_tokens(special_token_dict)
         if filename != None:
-            other = gensim.corpora.Dictionary.load_from_text(filename)
-            self.merge_with(other)
+            other = Vocab.load_from_text(filename)
+            for key in self.__dict__:
+                if not other.__dict__.get(key) is None:
+                    self.__dict__[key] = other.__dict__[key]
+        if special_token_dict != None:
+            self.patch_with_special_tokens(special_token_dict)
 
     def idx2doc(self, idxs, unknown_word=''):
         doc = [self.get(i, default=unknown_word) for i in idxs]
