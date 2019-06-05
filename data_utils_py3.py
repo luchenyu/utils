@@ -30,7 +30,7 @@ class Vocab(gensim.corpora.Dictionary):
 class AtomicVocab(Vocab):
     """
     Typically vocab of characters
-    with special tokens [<PAD>, <SEP>, <UNK>] at the beginning
+    with special tokens [<PAD>, <SEP>, <UNK>] in the beginning
     """
     def __init__(self, filename=None, special_tokens=[],
                  atomize_method=None, rev_atomize_method=None,
@@ -104,7 +104,7 @@ class AtomicVocab(Vocab):
 class MolecularVocab(Vocab):
     """
     Typically vocab of words
-    with special tokens [<PAD>] and optional [<SEP>, <UNK>] at the beginning
+    with special tokens [<PAD>] and optional [<SEP>, <UNK>] in the beginning
     """
     def __init__(self, atomic_vocab, filename=None, special_tokens=[]):
         self.atomic_vocab = atomic_vocab
