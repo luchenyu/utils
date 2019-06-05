@@ -1860,7 +1860,8 @@ def greedy_dec(length,
                cell,
                candidates_callback,
                start_embedding,
-               start_id):
+               start_id,
+               min_length=1):
     """
     A greedy decoder.
     args:
@@ -1910,7 +1911,7 @@ def greedy_dec(length,
         not_closed = tf.logical_not(closed)
         cur_len = tf.shape(paths)[1]
         outputs, state = cell(inputs, state)
-        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
+        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs, state)
         log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
         # select best 1
         indices = tf.argmax(log_probs, 1, output_type=tf.int32)
@@ -1969,7 +1970,8 @@ def stochastic_dec(length,
                    candidates_callback,
                    start_embedding,
                    start_id,
-                   num_candidates=1):
+                   num_candidates=1,
+                   min_length=1):
     """
     A stochastic decoder.
     args:
@@ -2023,7 +2025,7 @@ def stochastic_dec(length,
         not_closed = tf.logical_not(closed)
         cur_len = tf.shape(paths)[1]
         outputs, state = cell(inputs, state)
-        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs)
+        candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs, state)
         log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
         # random sample
         indices = tf.squeeze(tf.random.categorical(log_probs, 1, dtype=tf.int32), [1])
@@ -2345,8 +2347,8 @@ def stochastic_beam_dec(length,
         """
         cur_len = tf.shape(paths)[1]
         cur_len_fp32 = tf.cast(cur_len, tf.float32)
-        beta = 1.0 / (1.0 - math.exp(-1.0/float(min_length)))
-        alpha = beta * (1.0 - tf.exp((-cur_len_fp32) / float(min_length)))
+        beta = 1.0 / (1.0 - math.exp(-1.0/float(5)))
+        alpha = beta * (1.0 - tf.exp((-cur_len_fp32) / float(5)))
 
         # iter
         outputs, state = cell(inputs, state)
