@@ -23,6 +23,7 @@ from tensorflow.python.util import nest
 
 def fully_connected(inputs,
                     num_outputs,
+                    init_scale=1.0,
                     weight_normalize=False,
                     activation_fn=None,
                     dropout=None,
@@ -57,12 +58,22 @@ def fully_connected(inputs,
         out_shape = tf.unstack(tf.shape(inputs))
         out_shape[-1] = num_outputs
 
+        if dropout != None:
+            if is_training == True:
+                inputs = tf.nn.dropout(inputs, rate=dropout)
+            elif is_training != False:
+                inputs = tf.cond(
+                    tf.cast(is_training, tf.bool),
+                    lambda: tf.nn.dropout(inputs, rate=dropout),
+                    lambda: inputs)
+            init_scale *= 1.0-dropout
+
         weights_shape = [num_input_units, num_outputs]
         weights = tf.get_variable(
             'weights',
             shape=weights_shape,
             dtype=dtype,
-            initializer=tf.initializers.variance_scaling(mode='fan_in'),
+            initializer=tf.initializers.variance_scaling(scale=init_scale, mode='fan_in'),
             trainable=trainable,
             aggregation=tf.VariableAggregation.MEAN)
         if trainable and weight_normalize:
@@ -99,15 +110,6 @@ def fully_connected(inputs,
             # Reshape inputs
             inputs = tf.reshape(inputs, [-1, num_input_units])
 
-        if dropout != None:
-            if is_training == True:
-                inputs = tf.nn.dropout(inputs, rate=dropout)
-            elif is_training != False:
-                inputs = tf.cond(
-                    tf.cast(is_training, tf.bool),
-                    lambda: tf.nn.dropout(inputs, rate=dropout),
-                    lambda: inputs)
-
         outputs = tf.matmul(inputs, weights) + biases
 
         if activation_fn:
@@ -126,6 +128,7 @@ def convolution2d(inputs,
                   dilation_rates=None,
                   pool_size=None,
                   group_size=None,
+                  init_scale=1.0,
                   weight_normalize=False,
                   activation_fn=None,
                   dropout=None,
@@ -154,6 +157,7 @@ def convolution2d(inputs,
             output_sizes = [output_sizes]
             kernel_sizes = [kernel_sizes]
         assert(len(output_sizes) == len(kernel_sizes))
+
         if dropout != None:
             if is_training == True:
                 inputs = tf.nn.dropout(inputs, rate=dropout)
@@ -162,6 +166,8 @@ def convolution2d(inputs,
                     tf.cast(is_training, tf.bool),
                     lambda: tf.nn.dropout(inputs, rate=dropout),
                     lambda: inputs)
+            init_scale *= 1.0-dropout
+
         output_list = []
         for i in range(len(output_sizes)):
             with tf.variable_scope("conv"+str(i)):
@@ -175,7 +181,7 @@ def convolution2d(inputs,
                     name='weights',
                     shape=[kernel_size[0]*kernel_size[1]*num_filters_in, output_size],
                     dtype=dtype,
-                    initializer=tf.initializers.variance_scaling(mode='fan_in'),
+                    initializer=tf.initializers.variance_scaling(scale=init_scale, mode='fan_in'),
                     trainable=trainable,
                     aggregation=tf.VariableAggregation.MEAN)
                 if is_training != False and weight_normalize:
@@ -312,7 +318,7 @@ def layer_norm(inputs,
         trainable = (is_training != False)
         collections = [tf.GraphKeys.GLOBAL_VARIABLES]
         if trainable:
-            collections.append(tf.GraphKeys.WEIGHTS)
+            collections.append(tf.GraphKeys.BIASES)
         beta = tf.get_variable(
             'beta',
             shape=[],
@@ -352,8 +358,7 @@ def optimize_loss(loss,
     grad_var_list = optimizer.compute_gradients(
         loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
 
-    candidates = tf.get_collection(tf.GraphKeys.WEIGHTS, scope=scope) + \
-                 tf.get_collection(tf.GraphKeys.BIASES, scope=scope)
+    candidates = tf.get_collection(tf.GraphKeys.WEIGHTS, scope=scope)
 
     update_ops_ref = tf.get_collection_ref(tf.GraphKeys.UPDATE_OPS)
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=scope)
@@ -401,6 +406,7 @@ def GLU(inputs,
         feats = fully_connected(
             inputs,
             2*output_size,
+            init_scale=2.0,
             dropout=dropout,
             is_training=is_training,
             scope="feats")
@@ -424,21 +430,20 @@ def GCU(inputs,
                            "GCU",
                            [inputs],
                            reuse=reuse) as sc:
-        if dropout != None:
-            inputs = tf.cond(
-                tf.cast(is_training, tf.bool),
-                lambda: tf.nn.dropout(inputs, rate=dropout),
-                lambda: inputs)
         projs = convolution2d(
             inputs,
             output_size,
             kernel_size,
+            init_scale=2.0,
+            dropout=dropout,
             is_training=is_training,
             scope="projs")
         gates = convolution2d(
             inputs,
             output_size,
             kernel_size,
+            init_scale=1.0,
+            dropout=dropout,
             activation_fn=tf.sigmoid,
             is_training=is_training,
             scope="gates")
@@ -449,7 +454,7 @@ def MLP(inputs,
         num_layers,
         hidden_size,
         output_size,
-        activation_fn=tf.nn.relu,
+        activation_fn=tf.nn.selu,
         dropout=None,
         is_training=True,
         reuse=None,
@@ -463,25 +468,21 @@ def MLP(inputs,
                            [inputs],
                            reuse=reuse) as sc:
         size = inputs.get_shape()[-1].value
-        if dropout != None:
-            if is_training == True:
-                inputs = tf.nn.dropout(inputs, rate=dropout)
-            elif is_training != False:
-                inputs = tf.cond(
-                    tf.cast(is_training, tf.bool),
-                    lambda: tf.nn.dropout(inputs, rate=dropout),
-                    lambda: inputs)
         outputs = inputs
 
         # residual layers
         for i in range(num_layers-1):
             outputs = fully_connected(outputs,
                                       hidden_size,
+                                      init_scale=1.0,
+                                      dropout=dropout,
                                       activation_fn=activation_fn,
                                       is_training=is_training,
                                       scope="layer"+str(i))
+            dropout = None
         outputs = fully_connected(outputs,
                                   output_size,
+                                  init_scale=1.0,
                                   is_training=is_training,
                                   scope="layer"+str(num_layers-1))
         return outputs
@@ -1332,6 +1333,7 @@ def transformer(tfstruct,
         token_encodes = fully_connected(
             tfstruct.token_embeds,
             layer_size,
+            init_scale=1.0,
             dropout=dropout,
             is_training=is_training,
             scope='enc_projs')
@@ -1353,6 +1355,7 @@ def transformer(tfstruct,
                 querys = fully_connected(
                     querys,
                     layer_size,
+                    init_scale=1.0,
                     dropout=dropout,
                     is_training=is_training,
                     scope="query_projs")
@@ -1361,6 +1364,7 @@ def transformer(tfstruct,
                 keys = fully_connected(
                     keys,
                     layer_size,
+                    init_scale=1.0,
                     dropout=dropout,
                     is_training=is_training,
                     scope="key_projs")
