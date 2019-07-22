@@ -396,25 +396,64 @@ def optimize_loss(loss,
                   global_step,
                   optimizer,
                   var_list=None,
+                  update_every=None,
                   scope=None):
     """ Optimize the model using the loss.
 
     """
 
     var_list = tf.trainable_variables(scope=scope) if var_list == None else var_list
+    grad_var_dict = {}
+    for var in var_list:
+        grad_var = tf.get_variable(
+            'grad/'+var.name.split(':')[0],
+            shape=var.shape,
+            dtype=var.dtype,
+            initializer=tf.initializers.zeros(),
+            trainable=False,
+            aggregation=tf.VariableAggregation.SUM)
+        grad_var_dict[var.name] = grad_var
     grad_var_list = optimizer.compute_gradients(
         loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
+
+    new_grad_var_list = []
+    grad_ops = []
+    for (grad, var) in grad_var_list:
+        grad_var = grad_var_dict[var.name]
+        if not grad is None:
+            grad_ops.append(grad_var.assign_add(grad))
+        new_grad_var_list.append((grad_var, var))
 
     update_ops_ref = tf.get_collection_ref(tf.GraphKeys.UPDATE_OPS)
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=scope)
     for op in update_ops:
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
-    with tf.control_dependencies(update_ops):
-        train_op = optimizer.apply_gradients(
-            grad_var_list,
-            global_step=global_step)
-    return train_op
+
+    def do_update():
+        with tf.control_dependencies(update_ops+grad_ops):
+            train_op = optimizer.apply_gradients(
+                new_grad_var_list,
+                global_step=global_step)
+        with tf.control_dependencies([train_op]):
+            clean_ops = []
+            for grad_var in grad_var_dict.values():
+                clean_ops.append(grad_var.assign(tf.zeros_like(grad_var)))
+        with tf.control_dependencies(clean_ops):
+            do_update_op = tf.no_op()
+        return do_update_op
+    def no_update():
+        increase_step = global_step.assign_add(1)
+        with tf.control_dependencies(grad_ops+[increase_step]):
+            no_update_op = tf.no_op()
+        return no_update_op
+    update_every = 1 if update_every is None else update_every
+    final_op = tf.cond(
+        tf.equal(tf.floormod(global_step, update_every), 0),
+        true_fn=do_update,
+        false_fn=no_update,
+    )
+    return final_op
 
 ### Nets ###
 
