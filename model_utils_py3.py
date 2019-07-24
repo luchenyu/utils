@@ -38,14 +38,14 @@ def fully_connected(inputs,
         raise ValueError('num_outputs should be integer, got %s.', num_outputs)
 
     trainable = (is_training != False)
-    collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+    collections = [tf.compat.v1.GraphKeys.GLOBAL_VARIABLES]
     weights_collections = collections
     biases_collections = collections
     if trainable:
-        weights_collections.append(tf.GraphKeys.WEIGHTS)
-        biases_collections.append(tf.GraphKeys.BIASES)
+        weights_collections.append(tf.compat.v1.GraphKeys.WEIGHTS)
+        biases_collections.append(tf.compat.v1.GraphKeys.BIASES)
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            'fully_connected',
                            [inputs],
                            reuse=reuse) as sc:
@@ -69,7 +69,7 @@ def fully_connected(inputs,
             init_scale *= 1.0-dropout
 
         weights_shape = [num_input_units, num_outputs]
-        weights = tf.get_variable(
+        weights = tf.compat.v1.get_variable(
             'weights',
             shape=weights_shape,
             dtype=dtype,
@@ -77,7 +77,7 @@ def fully_connected(inputs,
             trainable=trainable,
             aggregation=tf.VariableAggregation.MEAN)
         if trainable and weight_normalize:
-            weights_norm = tf.get_variable(
+            weights_norm = tf.compat.v1.get_variable(
                 'weights_norm',
                 shape=[num_outputs,],
                 dtype=dtype,
@@ -89,7 +89,7 @@ def fully_connected(inputs,
                 tf.nn.l2_normalize(
                     weights, 0) * tf.exp(weights_norm))
             norm_op = tf.cond(
-                tf.logical_or(tf.cast(sc.reuse, tf.bool),tf.logical_not(tf.cast(is_training, tf.bool))),
+                tf.math.logical_or(tf.cast(sc.reuse, tf.bool),tf.math.logical_not(tf.cast(is_training, tf.bool))),
                 lambda: tf.zeros([]),
                 lambda: norm_op)
             with tf.control_dependencies([norm_op]):
@@ -97,7 +97,7 @@ def fully_connected(inputs,
                     tf.cast(is_training, tf.bool),
                     lambda: tf.nn.l2_normalize(weights, 0) * tf.exp(weights_norm),
                     lambda: tf.identity(weights))
-        biases = tf.get_variable(
+        biases = tf.compat.v1.get_variable(
             'biases',
             shape=[num_outputs,],
             dtype=dtype,
@@ -140,14 +140,14 @@ def convolution2d(inputs,
     """
 
     trainable = (is_training != False)
-    collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+    collections = [tf.compat.v1.GraphKeys.GLOBAL_VARIABLES]
     weights_collections = collections
     biases_collections = collections
     if trainable:
-        weights_collections.append(tf.GraphKeys.WEIGHTS)
-        biases_collections.append(tf.GraphKeys.BIASES)
+        weights_collections.append(tf.compat.v1.GraphKeys.WEIGHTS)
+        biases_collections.append(tf.compat.v1.GraphKeys.BIASES)
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            'Conv',
                            [inputs],
                            reuse=reuse) as sc:
@@ -170,14 +170,14 @@ def convolution2d(inputs,
 
         output_list = []
         for i in range(len(output_sizes)):
-            with tf.variable_scope("conv"+str(i)):
+            with tf.compat.v1.variable_scope("conv"+str(i)):
                 kernel_size = kernel_sizes[i]
                 output_size = output_sizes[i]
                 dilation_rate = None
                 if dilation_rates != None:
                     dilation_rate = dilation_rates[i]
                 weights_shape = list(kernel_size) + [num_filters_in, output_size]
-                weights = tf.get_variable(
+                weights = tf.compat.v1.get_variable(
                     name='weights',
                     shape=[kernel_size[0]*kernel_size[1]*num_filters_in, output_size],
                     dtype=dtype,
@@ -185,7 +185,7 @@ def convolution2d(inputs,
                     trainable=trainable,
                     aggregation=tf.VariableAggregation.MEAN)
                 if is_training != False and weight_normalize:
-                    weights_norm = tf.get_variable(
+                    weights_norm = tf.compat.v1.get_variable(
                         'weights_norm',
                         shape=[output_size,],
                         dtype=dtype,
@@ -197,7 +197,7 @@ def convolution2d(inputs,
                         tf.nn.l2_normalize(
                             weights, 0) * tf.exp(weights_norm))
                     norm_op = tf.cond(
-                        tf.logical_or(tf.cast(sc.reuse, tf.bool),tf.logical_not(tf.cast(is_training, tf.bool))),
+                        tf.math.logical_or(tf.cast(sc.reuse, tf.bool),tf.math.logical_not(tf.cast(is_training, tf.bool))),
                         lambda: tf.zeros([]),
                         lambda: norm_op)
                     with tf.control_dependencies([norm_op]):
@@ -205,7 +205,7 @@ def convolution2d(inputs,
                             tf.cast(is_training, tf.bool),
                             lambda: tf.nn.l2_normalize(weights, 0) * tf.exp(weights_norm),
                             lambda: tf.identity(weights))
-                biases = tf.get_variable(
+                biases = tf.compat.v1.get_variable(
                     name='biases',
                     shape=[output_size,],
                     dtype=dtype,
@@ -230,7 +230,7 @@ def convolution2d(inputs,
 
         if pool_size:
             pool_shape = [1] + list(pool_size) + [1]
-            outputs = tf.nn.max_pool(outputs, pool_shape, pool_shape, padding='SAME')
+            outputs = tf.nn.max_pool2d(outputs, pool_shape, pool_shape, padding='SAME')
 
         if activation_fn:
             outputs = activation_fn(outputs)
@@ -252,7 +252,7 @@ def mpconv2d(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            'Conv',
                            [inputs],
                            reuse=reuse) as sc:
@@ -269,10 +269,10 @@ def mpconv2d(inputs,
                 lambda: inputs)
         output_list = []
         for i in range(len(output_sizes)):
-            with tf.variable_scope("conv"+str(i)):
+            with tf.compat.v1.variable_scope("conv"+str(i)):
                 kernel_size = kernel_sizes[i]
                 output_size = output_sizes[i]
-                outputs = tf.nn.max_pool(inputs,
+                outputs = tf.nn.max_pool2d(inputs,
                                          [1]+kernel_size+[1],
                                          [1,1,1,1],
                                          'SAME')
@@ -294,7 +294,7 @@ def mpconv2d(inputs,
 
         if pool_size:
             pool_shape = [1] + list(pool_size) + [1]
-            outputs = tf.nn.max_pool(outputs, pool_shape, pool_shape, padding='SAME')
+            outputs = tf.nn.max_pool2d(outputs, pool_shape, pool_shape, padding='SAME')
 
         if activation_fn:
             outputs = activation_fn(outputs)
@@ -312,14 +312,14 @@ def layer_norm(inputs,
 
     """
 
-    with tf.variable_scope(scope, 'layer_norm') as sc:
+    with tf.compat.v1.variable_scope(scope, 'layer_norm') as sc:
 
         dtype = inputs.dtype.base_dtype
         trainable = (is_training != False)
-        collections = [tf.GraphKeys.GLOBAL_VARIABLES]
+        collections = [tf.compat.v1.GraphKeys.GLOBAL_VARIABLES]
         if trainable:
-            collections.append(tf.GraphKeys.BIASES)
-        beta = tf.get_variable(
+            collections.append(tf.compat.v1.GraphKeys.BIASES)
+        beta = tf.compat.v1.get_variable(
             'beta',
             shape=[],
             dtype=dtype,
@@ -327,7 +327,7 @@ def layer_norm(inputs,
             collections=collections,
             trainable=trainable,
             aggregation=tf.VariableAggregation.MEAN)
-        gamma = tf.get_variable(
+        gamma = tf.compat.v1.get_variable(
             'gamma',
             shape=[],
             dtype=dtype,
@@ -343,19 +343,19 @@ def layer_norm(inputs,
 
 ### Optimize ###
 
-class LAMBOptimizer(tf.train.AdamOptimizer):
+class LAMBOptimizer(tf.compat.v1.train.AdamOptimizer):
     def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
                  wd=0.0,
                  use_locking=False, name="Adam"):
         """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
-        tf.train.AdamOptimizer.__init__(
+        tf.compat.v1.train.AdamOptimizer.__init__(
             self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
             use_locking=use_locking, name=name)
         self.beta1_t = beta1_t
         self.wd = wd
 
     def _prepare(self):
-        tf.train.AdamOptimizer._prepare(self)
+        tf.compat.v1.train.AdamOptimizer._prepare(self)
         if self.beta1_t != None:
             self._beta1_t = self.beta1_t
 
@@ -382,7 +382,7 @@ class LAMBOptimizer(tf.train.AdamOptimizer):
             v_t = scatter_add(v, indices, v_scaled_g_values)
         v_sqrt = tf.math.sqrt(v_t)
         s_t = lr * m_t / (v_sqrt + epsilon_t)
-        candidates = tf.get_collection(tf.GraphKeys.WEIGHTS)
+        candidates = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.WEIGHTS)
         if var in candidates:
             s_t += self.wd*var
         r1_t = tf.norm(var)
@@ -402,10 +402,10 @@ def optimize_loss(loss,
 
     """
 
-    var_list = tf.trainable_variables(scope=scope) if var_list == None else var_list
+    var_list = tf.compat.v1.trainable_variables(scope=scope) if var_list == None else var_list
     grad_var_dict = {}
     for var in var_list:
-        grad_var = tf.get_variable(
+        grad_var = tf.compat.v1.get_variable(
             'grad/'+var.name.split(':')[0],
             shape=var.shape,
             dtype=var.dtype,
@@ -424,8 +424,8 @@ def optimize_loss(loss,
             grad_ops.append(grad_var.assign_add(grad))
         new_grad_var_list.append((grad_var, var))
 
-    update_ops_ref = tf.get_collection_ref(tf.GraphKeys.UPDATE_OPS)
-    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=scope)
+    update_ops_ref = tf.compat.v1.get_collection_ref(tf.compat.v1.GraphKeys.UPDATE_OPS)
+    update_ops = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS, scope=scope)
     for op in update_ops:
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
@@ -440,20 +440,21 @@ def optimize_loss(loss,
             for grad_var in grad_var_dict.values():
                 clean_ops.append(grad_var.assign(tf.zeros_like(grad_var)))
         with tf.control_dependencies(clean_ops):
-            do_update_op = tf.no_op()
-        return do_update_op
+            new_global_step = tf.identity(global_step)
+        return new_global_step
     def no_update():
-        increase_step = global_step.assign_add(1)
-        with tf.control_dependencies(grad_ops+[increase_step]):
-            no_update_op = tf.no_op()
-        return no_update_op
+        with tf.control_dependencies(update_ops+grad_ops):
+            new_global_step = global_step.assign_add(1)
+        return new_global_step
     update_every = 1 if update_every is None else update_every
-    final_op = tf.cond(
-        tf.equal(tf.floormod(global_step, update_every), 0),
-        true_fn=do_update,
-        false_fn=no_update,
-    )
-    return final_op
+    def call_once(strategy):
+        new_global_step = tf.cond(
+            tf.equal(tf.math.floormod(global_step+1, update_every), 0),
+            true_fn=lambda: strategy.extended.call_for_each_replica(do_update),
+            false_fn=lambda: strategy.extended.call_for_each_replica(no_update),
+        )
+        return new_global_step
+    return tf.distribute.get_replica_context().merge_call(call_once)
 
 ### Nets ###
 
@@ -467,7 +468,7 @@ def GLU(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "GLU",
                            [inputs],
                            reuse=reuse) as sc:
@@ -494,7 +495,7 @@ def GCU(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "GCU",
                            [inputs],
                            reuse=reuse) as sc:
@@ -531,7 +532,7 @@ def MLP(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "MLP",
                            [inputs],
                            reuse=reuse) as sc:
@@ -566,7 +567,7 @@ def highway(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "highway",
                            [inputs],
                            reuse=reuse) as sc:
@@ -602,7 +603,7 @@ def ResDNN(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "ResDNN",
                            [inputs],
                            reuse=reuse) as sc:
@@ -643,7 +644,7 @@ def ResDNN2(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "ResDNN",
                            [inputs],
                            reuse=reuse) as sc:
@@ -693,7 +694,7 @@ def SIRDNN(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "ResDNN",
                            [inputs],
                            reuse=reuse) as sc:
@@ -732,7 +733,7 @@ def SIRCNN(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "ResCNN",
                            [inputs],
                            reuse=reuse) as sc:
@@ -751,7 +752,7 @@ def SIRCNN(inputs,
         for j in range(pool_layers+1):
             if j > 0:
                 pool_shape = [1] + list(pool_size) + [1]
-                inputs = tf.nn.max_pool(outputs,
+                inputs = tf.nn.max_pool2d(outputs,
                                         pool_shape,
                                         pool_shape,
                                         padding='SAME')
@@ -762,7 +763,7 @@ def SIRCNN(inputs,
                         tf.cast(is_training, tf.bool),
                         lambda: tf.nn.dropout(inputs, rate=dropout),
                         lambda: inputs)
-            with tf.variable_scope("layer{0}".format(j)) as sc:
+            with tf.compat.v1.variable_scope("layer{0}".format(j)) as sc:
                 ru = None
                 for i in range(num_layers):
                     inputs = outputs
@@ -791,7 +792,7 @@ def ResCNN(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "ResCNN",
                            [inputs],
                            reuse=reuse) as sc:
@@ -807,7 +808,7 @@ def ResCNN(inputs,
         for j in range(pool_layers+1):
             if j > 0:
                 pool_shape = [1] + list(pool_size) + [1]
-                inputs = tf.nn.max_pool(outputs,
+                inputs = tf.nn.max_pool2d(outputs,
                                         pool_shape,
                                         pool_shape,
                                         padding='SAME')
@@ -815,7 +816,7 @@ def ResCNN(inputs,
                     outputs = inputs
                 else:
                     outputs = tf.nn.dropout(inputs, rate=dropout)
-            with tf.variable_scope("layer{0}".format(j)) as sc:
+            with tf.compat.v1.variable_scope("layer{0}".format(j)) as sc:
                 inputs = outputs
                 for i in range(num_layers):
                     inputs = convolution2d(activation_fn(inputs),
@@ -838,7 +839,7 @@ def DGCNN(inputs,
 
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "DGCNN",
                            [inputs],
                            reuse=reuse) as sc:
@@ -861,7 +862,7 @@ def DGCNN(inputs,
                                           scope="inputs_proj_"+str(i))
             pool_size = 1+2*dilate_size
             if pool_size > 1:
-                inputs_proj = tf.nn.max_pool(inputs_proj,
+                inputs_proj = tf.nn.max_pool2d(inputs_proj,
                                              [1,1,pool_size,1],
                                              [1,1,1,1],
                                              'SAME')
@@ -898,13 +899,13 @@ def cudnn_lstm(num_layers,
         num_units=num_units,
         direction=direction)
     lstm.build(input_shape)
-    if trainable and tf.get_variable_scope().reuse != True:
+    if trainable and tf.compat.v1.get_variable_scope().reuse != True:
         for var in lstm.trainable_variables:
             tf.add_to_collection(
-                tf.GraphKeys.WEIGHTS,
+                tf.compat.v1.GraphKeys.WEIGHTS,
                 var)
     elif not trainable:
-        train_vars = tf.get_collection_ref(tf.GraphKeys.TRAINABLE_VARIABLES)
+        train_vars = tf.compat.v1.get_collection_ref(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES)
         for var in lstm.trainable_variables:
             train_vars.remove(var)
     return lstm
@@ -962,12 +963,12 @@ def cudnn_lstm_legacy(inputs,
         input_mode="linear_input",
         direction=direction)
 
-    cudnn_params = tf.get_variable(
+    cudnn_params = tf.compat.v1.get_variable(
         "RNNParams",
         shape=[est_size],
         initializer=tf.contrib.layers.variance_scaling_initializer(),
-        collections=[tf.GraphKeys.GLOBAL_VARIABLES,
-                     tf.GraphKeys.WEIGHTS])
+        collections=[tf.compat.v1.GraphKeys.GLOBAL_VARIABLES,
+                     tf.compat.v1.GraphKeys.WEIGHTS])
 
     init_state = tf.tile(
         tf.zeros([2 * num_layers, 1, hidden_size], dtype=tf.float32),
@@ -1008,7 +1009,7 @@ def attention_simple(querys,
     masks: [batch_size x num_querys x length]
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "attention",
                            [querys, keys, values],
                            reuse=reuse) as sc:
@@ -1065,7 +1066,7 @@ def attention_with_position(querys,
     masks: [batch_size x num_querys x length]
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "attention",
                            [querys, keys, values],
                            reuse=reuse) as sc:
@@ -1102,7 +1103,7 @@ def attention_with_position(querys,
                 is_training=is_training,
                 scope="query_position_delta_projs")
             query_position_deltas = tf.stack(tf.split(query_position_deltas, num_head, axis=-1), axis=1)
-           # query_position_deltas = tf.get_variable(
+           # query_position_deltas = tf.compat.v1.get_variable(
            #     'query_posit_deltas',
            #     shape=[num_head, size],
            #     dtype=tf.float32,
@@ -1182,7 +1183,7 @@ def attention_write(querys,
     masks: [batch_size x num_querys x length]
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "attention",
                            [querys, values],
                            reuse=reuse) as sc:
@@ -1220,7 +1221,7 @@ def attention_write(querys,
                 is_training=is_training,
                 scope="query_position_delta_projs")
             query_position_deltas = tf.stack(tf.split(query_position_deltas, num_head, axis=-1), axis=1)
-           # query_position_deltas = tf.get_variable(
+           # query_position_deltas = tf.compat.v1.get_variable(
            #     'query_posit_deltas',
            #     shape=[num_head, size],
            #     dtype=tf.float32,
@@ -1383,7 +1384,7 @@ def transformer(tfstruct,
        tfstruct: input tfstruct with missing slots filled
     """
 
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "Transformer",
                            flatten_structure([tfstruct, extra_tfstruct]),
                            reuse=reuse) as sc:
@@ -1408,13 +1409,13 @@ def transformer(tfstruct,
 
         if attn_masks == None:
             attn_masks = tf.ones([batch_size, length, length+extra_length], dtype=tf.bool)
-        attn_masks = tf.logical_and(attn_masks,
-            tf.logical_not(tf.pad(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool), [[0,0],[0,0],[0,extra_length]])))
+        attn_masks = tf.math.logical_and(attn_masks,
+            tf.math.logical_not(tf.pad(tf.eye(length, batch_shape=[batch_size], dtype=tf.bool), [[0,0],[0,0],[0,extra_length]])))
 
         query_list, key_list, value_list = [], [], []
 
         for i in range(num_layers):
-            with tf.variable_scope("layer"+str(i)):
+            with tf.compat.v1.variable_scope("layer"+str(i)):
                 encodes_normed = layer_norm(
                     token_encodes, begin_norm_axis=-1, is_training=is_training)
                 querys = tf.concat([tfstruct.posit_embeds, encodes_normed], axis=-1)
@@ -1666,7 +1667,7 @@ class CudnnLSTMCell(object):
                  state,
                  reuse=None,
                  scope=None):
-        with tf.variable_scope(scope or "LSTM_Cell", reuse=reuse) as sc:
+        with tf.compat.v1.variable_scope(scope or "LSTM_Cell", reuse=reuse) as sc:
 
             batch_size = tf.shape(inputs)[0]            
             state = tuple(
@@ -1716,7 +1717,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                  state,
                  reuse=None,
                  scope=None):
-        with tf.variable_scope(scope or "Attn_Wrapper", reuse=reuse):
+        with tf.compat.v1.variable_scope(scope or "Attn_Wrapper", reuse=reuse):
             keys = []
             values = []
             masks = []
@@ -1761,7 +1762,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                     k = sk
                     v = sv
                     m = sm
-                with tf.variable_scope("attention"+str(i)):
+                with tf.compat.v1.variable_scope("attention"+str(i)):
                     attn_feats[i], attn_logits, coverages[i] = self.attention_fn(
                         query,
                         k,
@@ -1804,7 +1805,7 @@ class AttentionCellWrapper(tf.contrib.rnn.RNNCell):
                 mask = tf.cast(state[2], tf.float32)
                 coverage = state[4]
                 cov_penalty = tf.reduce_sum(
-                    tf.log(tf.minimum(coverage+1e-5, 1.0)) * mask,
+                    tf.math.log(tf.minimum(coverage+1e-5, 1.0)) * mask,
                     axis=-1) / tf.reduce_sum(mask, axis=-1)
                 cov_penalties.append(cov_penalty)
                 state = state[5:]
@@ -1854,17 +1855,17 @@ def glow(inputs,
          reuse=None,
          scope=None):
     """ glow architecture """
-    with tf.variable_scope(scope,
+    with tf.compat.v1.variable_scope(scope,
                            "Glow",
                            [inputs],
                            reuse=reuse) as sc:
         x = inputs
         zlist = []
         for i in range(num_iters):
-            with tf.variable_scope("iter"+str(i)):
+            with tf.compat.v1.variable_scope("iter"+str(i)):
                 xdim = x.get_shape()[-1].value
                 for j in range(num_layers):
-                    with tf.variable_scope("layer"+str(j)):
+                    with tf.compat.v1.variable_scope("layer"+str(j)):
                         x = fully_connected(x,
                                             xdim,
                                             is_training=is_training,
@@ -1969,7 +1970,7 @@ def greedy_dec(length,
     closed = tf.zeros([batch_size], dtype=tf.bool)
 
     def cond(inputs, state, paths, scores, closed):
-        return tf.logical_not(tf.reduce_all(closed))
+        return tf.math.logical_not(tf.reduce_all(closed))
 
     def body(inputs, state, paths, scores, closed):
         """
@@ -1980,16 +1981,16 @@ def greedy_dec(length,
             scores: batch_size
             closed: batch_size
         """
-        not_closed = tf.logical_not(closed)
+        not_closed = tf.math.logical_not(closed)
         cur_len = tf.shape(paths)[1]
         outputs, state = cell(inputs, state)
         candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs, state)
-        log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
+        log_probs = logits + tf.math.log(tf.cast(candidate_masks, tf.float32))
         # select best 1
         indices = tf.argmax(log_probs, 1, output_type=tf.int32)
         indices *= tf.cast(not_closed, tf.int32)
         batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
-        closing = tf.logical_and(tf.equal(indices, 0), not_closed)
+        closing = tf.math.logical_and(tf.equal(indices, 0), not_closed)
         # update scores
         new_score = tf.gather_nd(log_probs, batch_indices)
         scores += new_score * tf.cast(not_closed, tf.float32)
@@ -2008,7 +2009,7 @@ def greedy_dec(length,
         new_ids = tf.expand_dims(new_ids, axis=1)
         paths = tf.concat([paths, new_ids], axis=1)
         # update closed
-        closed = tf.logical_or(closed, closing)
+        closed = tf.math.logical_or(closed, closing)
         return inputs, state, paths, scores, closed
 
     # shape_invariants
@@ -2082,7 +2083,7 @@ def stochastic_dec(length,
     closed = tf.zeros([batch_size*num_candidates], dtype=tf.bool)
 
     def cond(inputs, state, paths, scores, closed):
-        return tf.logical_not(tf.reduce_all(closed))
+        return tf.math.logical_not(tf.reduce_all(closed))
 
     def body(inputs, state, paths, scores, closed):
         """
@@ -2094,16 +2095,16 @@ def stochastic_dec(length,
             closed_paths: batch_size x current_length x length [x word_len]
             closed_scores: batch_size x current_length
         """
-        not_closed = tf.logical_not(closed)
+        not_closed = tf.math.logical_not(closed)
         cur_len = tf.shape(paths)[1]
         outputs, state = cell(inputs, state)
         candidate_embeds, candidate_ids, candidate_masks, logits = candidates_callback(outputs, state)
-        log_probs = logits + tf.log(tf.cast(candidate_masks, tf.float32))
+        log_probs = logits + tf.math.log(tf.cast(candidate_masks, tf.float32))
         # random sample
         indices = tf.squeeze(tf.random.categorical(log_probs, 1, dtype=tf.int32), [1])
         indices *= tf.cast(not_closed, tf.int32)
         batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
-        closing = tf.logical_and(tf.equal(indices, 0), not_closed)
+        closing = tf.math.logical_and(tf.equal(indices, 0), not_closed)
         # update scores
         new_score = tf.gather_nd(log_probs, batch_indices)
         scores += new_score * tf.cast(not_closed, tf.float32)
@@ -2122,7 +2123,7 @@ def stochastic_dec(length,
         new_ids = tf.expand_dims(new_ids, axis=1)
         paths = tf.concat([paths, new_ids], axis=1)
         # update closed
-        closed = tf.logical_or(closed, closing)
+        closed = tf.math.logical_or(closed, closing)
         return inputs, state, paths, scores, closed
 
     # shape_invariants
@@ -2205,7 +2206,7 @@ def beam_dec(length,
             tf.expand_dims(tf.expand_dims(start_id, axis=0), axis=1), [batch_size*beam_size,1,1])
     scores = tf.concat(
         [tf.ones([batch_size, 1]), tf.zeros([batch_size, beam_size-1])], axis=1)
-    scores = tf.reshape(tf.maximum(tf.log(scores), -999.0), [batch_size*beam_size])
+    scores = tf.reshape(tf.maximum(tf.math.log(scores), -999.0), [batch_size*beam_size])
     closed_scores = tf.zeros([batch_size*beam_size, 0])
 
     def cond(inputs, state, paths, scores, closed_paths, closed_scores):
@@ -2230,7 +2231,7 @@ def beam_dec(length,
         vocab_size = tf.shape(logits)[1]
         candidate_masks = tf.cast(candidate_masks, tf.float32)
         logits *= candidate_masks
-        log_probs = logits + tf.maximum(tf.log(candidate_masks), -999.0)
+        log_probs = logits + tf.maximum(tf.math.log(candidate_masks), -999.0)
 
         # closing mask
         cutoff_size = tf.cast(
@@ -2250,13 +2251,13 @@ def beam_dec(length,
         repeat_masks = mask_repeat(paths_to_match, 10)
         repeat_ratio = tf.reduce_sum(
             tf.cast(repeat_masks, tf.float32), axis=1, keepdims=True) / cur_len_fp32
-        repeat_penalty = tf.log(1.0-repeat_ratio)
+        repeat_penalty = tf.math.log(1.0-repeat_ratio)
 
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
         closing_scores += tf.squeeze(repeat_penalty, [1])
-        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / float(min_length), 1.0)), -999.0)
-        closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
+        closing_scores += tf.maximum(tf.math.log(tf.minimum((cur_len_fp32-1.0) / float(min_length), 1.0)), -999.0)
+        closing_scores += tf.maximum(tf.math.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
 
         # closed paths
@@ -2288,7 +2289,7 @@ def beam_dec(length,
         paths = tf.gather(paths, beam_parent)
 
         # next
-        indices = tf.floormod(top_indices, (vocab_size-1))
+        indices = tf.math.floormod(top_indices, (vocab_size-1))
         indices = tf.reshape(indices, [-1])
         batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
         if len(candidate_embeds.get_shape()) == 2:
@@ -2399,7 +2400,7 @@ def stochastic_beam_dec(length,
             tf.expand_dims(tf.expand_dims(start_id, axis=0), axis=1), [batch_size*beam_size,1,1])
     scores = tf.concat(
         [tf.ones([batch_size, 1]), tf.zeros([batch_size, beam_size-1])], axis=1)
-    scores = tf.reshape(tf.maximum(tf.log(scores), -999.0), [batch_size*beam_size])
+    scores = tf.reshape(tf.maximum(tf.math.log(scores), -999.0), [batch_size*beam_size])
     closed_scores = tf.zeros([batch_size*beam_size, 0])
 
     exp_dist = tfp.distributions.Exponential(2.0)
@@ -2428,7 +2429,7 @@ def stochastic_beam_dec(length,
         vocab_size = tf.shape(logits)[1]
         candidate_masks = tf.cast(candidate_masks, tf.float32)
         logits *= candidate_masks
-        log_probs = logits + tf.maximum(tf.log(candidate_masks), -999.0)
+        log_probs = logits + tf.maximum(tf.math.log(candidate_masks), -999.0)
 
         # closing mask
         cutoff_size = tf.cast(
@@ -2448,13 +2449,13 @@ def stochastic_beam_dec(length,
         repeat_masks = mask_repeat(paths_to_match, 10)
         repeat_ratio = tf.reduce_sum(
             tf.cast(repeat_masks, tf.float32), axis=1, keepdims=True) / cur_len_fp32
-        repeat_penalty = tf.log(1.0-repeat_ratio)
+        repeat_penalty = tf.math.log(1.0-repeat_ratio)
 
         # closed scores
         closing_scores = (log_probs[:,0] + scores) / cur_len_fp32
         closing_scores += tf.squeeze(repeat_penalty, [1])
-        closing_scores += tf.maximum(tf.log(tf.minimum((cur_len_fp32-1.0) / float(min_length), 1.0)), -999.0)
-        closing_scores += tf.maximum(tf.log(tf.cast(closing_masks, tf.float32)), -999.0)
+        closing_scores += tf.maximum(tf.math.log(tf.minimum((cur_len_fp32-1.0) / float(min_length), 1.0)), -999.0)
+        closing_scores += tf.maximum(tf.math.log(tf.cast(closing_masks, tf.float32)), -999.0)
         closed_scores = tf.concat([closed_scores, tf.expand_dims(closing_scores, axis=1)], axis=1)
 
         # closed paths
@@ -2488,7 +2489,7 @@ def stochastic_beam_dec(length,
         paths = tf.gather(paths, beam_parent)
 
         # next
-        indices = tf.floormod(sample_indices, (vocab_size-1))
+        indices = tf.math.floormod(sample_indices, (vocab_size-1))
         indices = tf.reshape(indices, [-1])
         batch_indices = tf.stack([tf.range(tf.shape(indices)[0], dtype=tf.int32), indices], axis=1)
         if len(candidate_embeds.get_shape()) == 2:
@@ -2614,10 +2615,10 @@ def slice_words(seqs, segs, get_idxs=False, encodes=None):
     padded_segs = tf.pad(segs, [[0,0],[1,1]], constant_values=1.0)
     padded_segs = tf.cast(padded_segs, tf.bool)
     padded_seq_masks = tf.not_equal(padded_seqs, 0)
-    padded_seg_masks1 = tf.logical_or(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
-    padded_segs = tf.logical_and(padded_segs, padded_seg_masks1)
-    padded_seg_masks2 = tf.logical_xor(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
-    padded_segs = tf.logical_or(padded_segs, padded_seg_masks2)
+    padded_seg_masks1 = tf.math.logical_or(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
+    padded_segs = tf.math.logical_and(padded_segs, padded_seg_masks1)
+    padded_seg_masks2 = tf.math.logical_xor(padded_seq_masks[:,:-1], padded_seq_masks[:,1:])
+    padded_segs = tf.math.logical_or(padded_segs, padded_seg_masks2)
 
     num_words = tf.maximum(
         tf.reduce_sum(tf.cast(padded_segs, tf.int32), axis=1)-1, 0)
@@ -2650,7 +2651,7 @@ def slice_words(seqs, segs, get_idxs=False, encodes=None):
     results.append(segmented_seqs)
 
     if get_idxs:
-        idx_starts = tf.cast(tf.logical_not(tf.sequence_mask(starts, max_length)), tf.int32)
+        idx_starts = tf.cast(tf.math.logical_not(tf.sequence_mask(starts, max_length)), tf.int32)
         idx_ends = tf.sequence_mask(starts+lengths, max_length, dtype=tf.int32)
         idx_ends *= tf.expand_dims(tf.expand_dims(tf.range(1, max_num_word+1, dtype=tf.int32), 0), 2)
         segment_idxs = tf.reduce_sum(idx_starts * idx_ends, axis=1)-1
@@ -2744,7 +2745,7 @@ def unique_vector(x, mode='first'):
     max_indices = tf.reduce_max(masked_indices, axis=1)
     if mode == 'random':
         sample_ids = tf.random.categorical(
-            tf.log(tf.cast(masks, tf.float32)), 1, dtype=tf.int32)
+            tf.math.log(tf.cast(masks, tf.float32)), 1, dtype=tf.int32)
 
     unique_max_indices, _ = tf.unique(max_indices)
     if mode == 'first':
