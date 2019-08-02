@@ -344,7 +344,7 @@ def layer_norm(inputs,
 ### Optimize ###
 
 class LAMBOptimizer(tf.compat.v1.train.AdamOptimizer):
-    def __init__(self, learning_rate=0.001, beta1=0.9, beta1_t=None, beta2=0.999, epsilon=1e-8,
+    def __init__(self, learning_rate=0.001, beta1=0.5, beta1_t=None, beta2=0.99, epsilon=1e-8,
                  wd=0.0,
                  use_locking=False, name="Adam"):
         """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
@@ -411,8 +411,9 @@ def optimize_loss(loss,
             dtype=var.dtype,
             initializer=tf.initializers.zeros(),
             trainable=False,
-            aggregation=tf.VariableAggregation.SUM)
+            aggregation=tf.VariableAggregation.MEAN)
         grad_var_dict[var.name] = grad_var
+    loss = loss if update_every is None else loss/float(update_every)
     grad_var_list = optimizer.compute_gradients(
         loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
 
