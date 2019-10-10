@@ -660,12 +660,13 @@ def optimize_loss(loss,
     grad_var_list = optimizer.compute_gradients(
         loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
 
+    scale = float(1/update_every)
     new_grad_var_list = []
     grad_ops = []
     for (grad, var) in grad_var_list:
         grad_var = grad_var_dict[var.name]
         if not grad is None:
-            grad_ops.append(grad_var.assign_add(grad))
+            grad_ops.append(grad_var.assign_add(tf.math.scalar_mul(scale, grad)))
         new_grad_var_list.append((grad_var, var))
 
     update_ops_ref = tf.compat.v1.get_collection_ref(tf.compat.v1.GraphKeys.UPDATE_OPS)
