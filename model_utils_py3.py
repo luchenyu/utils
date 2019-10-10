@@ -21,6 +21,21 @@ from tensorflow.python.util import nest
 
 ### Building Blocks ###
 
+# GELU
+def gelu(x):
+    """Gaussian Error Linear Unit.
+    This is a smoother version of the RELU.
+    Original paper: https://arxiv.org/abs/1606.08415
+    Args:
+        x: float Tensor to perform activation.
+    Returns:
+        `x` with the GELU activation applied.
+    """
+    cdf = 0.5 * (1.0 + tf.tanh(
+        (np.sqrt(2 / np.pi) * (x + 0.044715 * tf.pow(x, 3)))))
+    return x * cdf
+
+# FC layer
 def fully_connected(inputs,
                     num_outputs,
                     init_scale=1.0,
@@ -1712,7 +1727,7 @@ def transformer(tfstruct,
                     2,
                     layer_size,
                     layer_size,
-                    activation_fn=tf.nn.relu,
+                    activation_fn=gelu,
                     dropout=dropout,
                     is_training=is_training)
         encodes_normed = layer_norm(
