@@ -90,7 +90,7 @@ def fully_connected(inputs,
             dtype=dtype,
             initializer=tf.initializers.variance_scaling(scale=init_scale, mode='fan_in'),
             trainable=trainable,
-            aggregation=tf.VariableAggregation.MEAN)
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         if trainable and weight_normalize:
             weights_norm = tf.compat.v1.get_variable(
                 'weights_norm',
@@ -99,7 +99,7 @@ def fully_connected(inputs,
                 initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
                 collections=weights_collections,
                 trainable=trainable,
-                aggregation=tf.VariableAggregation.MEAN)
+                aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
             norm_op = weights.assign(
                 tf.nn.l2_normalize(
                     weights, 0) * tf.exp(weights_norm))
@@ -119,7 +119,7 @@ def fully_connected(inputs,
             initializer=tf.initializers.zeros(),
             collections=biases_collections,
             trainable=trainable,
-            aggregation=tf.VariableAggregation.MEAN)
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
 
         if len(static_shape) > 2:
             # Reshape inputs
@@ -198,7 +198,7 @@ def convolution2d(inputs,
                     dtype=dtype,
                     initializer=tf.initializers.variance_scaling(scale=init_scale, mode='fan_in'),
                     trainable=trainable,
-                    aggregation=tf.VariableAggregation.MEAN)
+                    aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
                 if is_training != False and weight_normalize:
                     weights_norm = tf.compat.v1.get_variable(
                         'weights_norm',
@@ -207,7 +207,7 @@ def convolution2d(inputs,
                         initializer=tf.initializers.variance_scaling(mode='fan_out', distribution='uniform'),
                         collections=weights_collections,
                         trainable=trainable,
-                        aggregation=tf.VariableAggregation.MEAN)
+                        aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
                     norm_op = weights.assign(
                         tf.nn.l2_normalize(
                             weights, 0) * tf.exp(weights_norm))
@@ -227,7 +227,7 @@ def convolution2d(inputs,
                     initializer=tf.initializers.zeros(),
                     collections=biases_collections,
                     trainable=trainable,
-                    aggregation=tf.VariableAggregation.MEAN)
+                    aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
                 weights = tf.reshape(weights, weights_shape)
                 outputs = tf.nn.convolution(
                     inputs, weights, padding='SAME', dilation_rate=dilation_rate) + biases
@@ -341,7 +341,7 @@ def layer_norm(inputs,
             initializer=tf.initializers.zeros(),
             collections=collections,
             trainable=trainable,
-            aggregation=tf.VariableAggregation.MEAN)
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         gamma = tf.compat.v1.get_variable(
             'gamma',
             shape=[],
@@ -349,7 +349,7 @@ def layer_norm(inputs,
             initializer=tf.initializers.ones(),
             collections=collections,
             trainable=trainable,
-            aggregation=tf.VariableAggregation.MEAN)
+            aggregation=tf.VariableAggregation.ONLY_FIRST_REPLICA)
         outputs = tf.contrib.layers.layer_norm(
             inputs, center=False, scale=False, begin_norm_axis=begin_norm_axis)
         outputs = beta + gamma*outputs
@@ -357,6 +357,22 @@ def layer_norm(inputs,
 
 
 ### Optimize ###
+
+class AdamOptimizer(tf.compat.v1.train.AdamOptimizer):
+    def __init__(self, learning_rate=0.001, beta1=0.5, beta1_t=None, beta2=0.99, epsilon=1e-8,
+                 wd=0.0,
+                 use_locking=False, name="Adam"):
+        """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
+        tf.compat.v1.train.AdamOptimizer.__init__(
+            self, learning_rate=learning_rate, beta1=beta1, beta2=beta2, epsilon=epsilon,
+            use_locking=use_locking, name=name)
+        self.beta1_t = beta1_t
+        self.wd = wd
+
+    def _prepare(self):
+        tf.compat.v1.train.AdamOptimizer._prepare(self)
+        if self.beta1_t != None:
+            self._beta1_t = self.beta1_t
 
 class LAMBOptimizer(tf.compat.v1.train.AdamOptimizer):
     def __init__(self, learning_rate=0.001, beta1=0.5, beta1_t=None, beta2=0.99, epsilon=1e-8,
@@ -373,6 +389,45 @@ class LAMBOptimizer(tf.compat.v1.train.AdamOptimizer):
         tf.compat.v1.train.AdamOptimizer._prepare(self)
         if self.beta1_t != None:
             self._beta1_t = self.beta1_t
+
+    def _resource_apply_dense(self, grad, var):
+        return self._apply_dense(grad, var)
+
+    def _apply_dense(self, grad, var):
+        beta1_power, beta2_power = self._get_beta_accumulators()
+        beta1_power = tf.dtypes.cast(beta1_power, var.dtype.base_dtype)
+        beta2_power = tf.dtypes.cast(beta2_power, var.dtype.base_dtype)
+        lr_t = tf.dtypes.cast(self._lr_t, var.dtype.base_dtype)
+        beta1_t = tf.dtypes.cast(self._beta1_t, var.dtype.base_dtype)
+        beta2_t = tf.dtypes.cast(self._beta2_t, var.dtype.base_dtype)
+        epsilon_t = tf.dtypes.cast(self._epsilon_t, var.dtype.base_dtype)
+        lr = (lr_t * tf.math.sqrt(1 - beta2_power) / (1 - beta1_power))
+        # m_t = beta1 * m + (1 - beta1) * g_t
+        m = self.get_slot(var, "m")
+        m_scaled_g_values = grad * (1 - beta1_t)
+        m_t = tf.assign(m, m * beta1_t, use_locking=self._use_locking)
+        with tf.control_dependencies([m_t]):
+            m_t = tf.assign_add(m, m_scaled_g_values, use_locking=self._use_locking)
+        # v_t = beta2 * v + (1 - beta2) * (g_t * g_t)
+        v = self.get_slot(var, "v")
+        v_scaled_g_values = (grad * grad) * (1 - beta2_t)
+        v_t = tf.assign(v, v * beta2_t, use_locking=self._use_locking)
+        with tf.control_dependencies([v_t]):
+            v_t = tf.assign_add(v, v_scaled_g_values, use_locking=self._use_locking)
+        v_sqrt = tf.math.sqrt(v_t)
+        s_t = lr * m_t / (v_sqrt + epsilon_t)
+        candidates = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.WEIGHTS)
+        if var in candidates:
+            s_t += self.wd*var
+        r1_t = tf.norm(var)
+        r2_t = tf.norm(s_t)
+        s_t *= tf.math.minimum(
+            tf.where(
+                tf.greater(r1_t, 0.), tf.where(tf.greater(r2_t, 0.), 0.1*r1_t/r2_t, 1.0), 1.0),
+            10.0)
+        var_update = tf.assign_sub(
+            var, s_t, use_locking=self._use_locking)
+        return tf.group(*[var_update, m_t, v_t])
 
     def _apply_sparse_shared(self, grad, var, indices, scatter_add):
         beta1_power, beta2_power = self._get_beta_accumulators()
@@ -402,7 +457,10 @@ class LAMBOptimizer(tf.compat.v1.train.AdamOptimizer):
             s_t += self.wd*var
         r1_t = tf.norm(var)
         r2_t = tf.norm(s_t)
-        s_t *= tf.minimum(r1_t/r2_t, 10.0)
+        s_t *= tf.math.minimum(
+            tf.where(
+                tf.greater(r1_t, 0.), tf.where(tf.greater(r2_t, 0.), 0.1*r1_t/r2_t, 1.0), 1.0),
+            10.0)
         var_update = tf.assign_sub(
             var, s_t, use_locking=self._use_locking)
         return tf.group(*[var_update, m_t, v_t])
@@ -450,6 +508,59 @@ class RAdamOptimizer(tf.compat.v1.train.AdamOptimizer):
         if self.beta1_t != None:
             self._beta1_t = self.beta1_t
 
+    def _resource_apply_dense(self, grad, var):
+        return self._apply_dense(grad, var)
+
+    def _apply_dense(self, grad, var):
+        beta1_power, beta2_power = self._get_beta_accumulators()
+        t = self._get_t_accumulator()
+        beta1_power = tf.dtypes.cast(beta1_power, var.dtype.base_dtype)
+        beta2_power = tf.dtypes.cast(beta2_power, var.dtype.base_dtype)
+        t = tf.dtypes.cast(t, var.dtype.base_dtype)
+        lr_t = tf.dtypes.cast(self._lr_t, var.dtype.base_dtype)
+        beta1_t = tf.dtypes.cast(self._beta1_t, var.dtype.base_dtype)
+        beta2_t = tf.dtypes.cast(self._beta2_t, var.dtype.base_dtype)
+        epsilon_t = tf.dtypes.cast(self._epsilon_t, var.dtype.base_dtype)
+
+        N_sma = self.N_sma_max - 2 * t * beta2_power / (1 - beta2_power)
+
+        # m_t = beta1 * m + (1 - beta1) * g_t
+        m = self.get_slot(var, "m")
+        m_scaled_g_values = grad * (1 - beta1_t)
+        m_t = tf.assign(m, m * beta1_t, use_locking=self._use_locking)
+        with tf.control_dependencies([m_t]):
+            m_t = tf.assign_add(m, m_scaled_g_values, use_locking=self._use_locking)
+        m_t_hat = m_t / (1 - beta1_power)
+
+        # v_t = beta2 * v + (1 - beta2) * (g_t * g_t)
+        v = self.get_slot(var, "v")
+        v_scaled_g_values = (grad * grad) * (1 - beta2_t)
+        v_t = tf.assign(v, v * beta2_t, use_locking=self._use_locking)
+        with tf.control_dependencies([v_t]):
+            v_t = tf.assign_add(v, v_scaled_g_values, use_locking=self._use_locking)
+        v_sqrt_hat = tf.math.sqrt(v_t / (1 - beta2_power))
+
+        r_t = tf.math.sqrt(
+                (N_sma-4)/(self.N_sma_max-4)*(N_sma-2)/(self.N_sma_max-2)*self.N_sma_max/N_sma)
+
+        s_t = tf.cond(
+            tf.greater(N_sma, 4),
+            lambda: r_t*lr_t*m_t_hat/(v_sqrt_hat+epsilon_t),
+            lambda: lr_t*m_t_hat,
+        )
+        candidates = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.WEIGHTS)
+        if var in candidates:
+            s_t += self.wd*var
+#         r1_t = tf.norm(var)
+#         r2_t = tf.norm(s_t)
+#         s_t *= r_t*tf.math.minimum(
+#             tf.where(
+#                 tf.greater(r1_t, 0.), tf.where(tf.greater(r2_t, 0.), 0.1*r1_t/r2_t, 1.0), 1.0),
+#             10.0)
+        var_update = tf.assign_sub(
+            var, s_t, use_locking=self._use_locking)
+        return tf.group(*[var_update, m_t, v_t])
+
     def _apply_sparse_shared(self, grad, var, indices, scatter_add):
         beta1_power, beta2_power = self._get_beta_accumulators()
         t = self._get_t_accumulator()
@@ -479,23 +590,23 @@ class RAdamOptimizer(tf.compat.v1.train.AdamOptimizer):
             v_t = scatter_add(v, indices, v_scaled_g_values)
         v_sqrt_hat = tf.math.sqrt(v_t / (1 - beta2_power))
 
-        r_t = tf.math.sqrt((N_sma-4)/(N_sma_max-4)*(N_sma-2)/(N_sma_max-2)*N_sma_max/N_sma)
+        r_t = tf.math.sqrt(
+                (N_sma-4)/(self.N_sma_max-4)*(N_sma-2)/(self.N_sma_max-2)*self.N_sma_max/N_sma)
+
         s_t = tf.cond(
-            tf.greater(N_sma, 5),
-            lambda: lr_t*m_t_hat/(v_sqrt_hat+epsilon_t),
+            tf.greater(N_sma, 4),
+            lambda: r_t*lr_t*m_t_hat/(v_sqrt_hat+epsilon_t),
             lambda: lr_t*m_t_hat,
         )
         candidates = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.WEIGHTS)
         if var in candidates:
             s_t += self.wd*var
-        r1_t = tf.norm(var)
-        r2_t = tf.norm(s_t)
-        s_t *= tf.minimum(r1_t/r2_t, 10.0)
-        s_t = tf.cond(
-            tf.greater(N_sma, 5),
-            lambda: r_t*s_t,
-            lambda: s_t,
-        )
+#         r1_t = tf.norm(var)
+#         r2_t = tf.norm(s_t)
+#         s_t *= r_t*tf.math.minimum(
+#             tf.where(
+#                 tf.greater(r1_t, 0.), tf.where(tf.greater(r2_t, 0.), 0.1*r1_t/r2_t, 1.0), 1.0),
+#             10.0)
         var_update = tf.assign_sub(
             var, s_t, use_locking=self._use_locking)
         return tf.group(*[var_update, m_t, v_t])
@@ -515,7 +626,7 @@ class RAdamOptimizer(tf.compat.v1.train.AdamOptimizer):
             *update_ops + [update_beta1, update_beta2, update_t], name=name_scope)
 
 class RangerOptimizer(tf.compat.v1.train.AdamOptimizer):
-    def __init__(self, learning_rate=0.001, beta1=0.5, beta1_t=None, beta2=0.99, epsilon=1e-8,
+    def __init__(self, learning_rate=0.001, beta1=0.5, beta1_t=None, beta2=0.99, epsilon=1e-20,
                  wd=0.0,
                  use_locking=False, name="Adam"):
         """beta1 is the initial momentum, beta1_t is the dynamic momentum"""
@@ -526,12 +637,12 @@ class RangerOptimizer(tf.compat.v1.train.AdamOptimizer):
         self.wd = wd
         self.N_sma_max = 2 / (1-beta2) - 1
 
-    def _get_var(self, var_name):
+    def get_non_slot(self, var_name):
         with tf.init_scope():
             if tf.executing_eagerly():
                 graph = None
             else:
-                graph = tf.get_default_graph()
+                graph = tf.compat.v1.get_default_graph()
             return self._get_non_slot_variable(var_name, graph=graph)
 
     def _create_slots(self, var_list):
@@ -541,9 +652,6 @@ class RangerOptimizer(tf.compat.v1.train.AdamOptimizer):
         # silently ignored).
         first_var = min(var_list, key=lambda x: x.name)
         self.var_list = var_list
-        for var in var_list:
-            self._create_non_slot_variable(
-                initial_value=var, name=var.name.split(':')[0]+'-cp', colocate_with=first_var)
         self._create_non_slot_variable(
             initial_value=self._beta1, name="beta1_power", colocate_with=first_var)
         self._create_non_slot_variable(
@@ -555,16 +663,78 @@ class RangerOptimizer(tf.compat.v1.train.AdamOptimizer):
         for v in var_list:
             self._zeros_slot(v, "m", self._name)
             self._zeros_slot(v, "v", self._name)
+            self._zeros_slot(v, "cp", self._name)
 
     def _prepare(self):
         tf.compat.v1.train.AdamOptimizer._prepare(self)
         if self.beta1_t != None:
             self._beta1_t = self.beta1_t
 
-    def _apply_sparse_shared(self, grad, var, indices, scatter_add):
-        var_cp = self._get_var(var.name.split(':')[0]+'-cp')
+    def _resource_apply_dense(self, grad, var):
+        return self._apply_dense(grad, var)
+
+    def _apply_dense(self, grad, var):
+        var_cp = self.get_slot(var, "cp")
         beta1_power, beta2_power = self._get_beta_accumulators()
-        t = self._get_var("t")
+        t = self.get_non_slot("t")
+        beta1_power = tf.dtypes.cast(beta1_power, var.dtype.base_dtype)
+        beta2_power = tf.dtypes.cast(beta2_power, var.dtype.base_dtype)
+        t = tf.dtypes.cast(t, var.dtype.base_dtype)
+        lr_t = tf.dtypes.cast(self._lr_t, var.dtype.base_dtype)
+        beta1_t = tf.dtypes.cast(self._beta1_t, var.dtype.base_dtype)
+        beta2_t = tf.dtypes.cast(self._beta2_t, var.dtype.base_dtype)
+        epsilon_t = tf.dtypes.cast(self._epsilon_t, var.dtype.base_dtype)
+
+        N_sma = self.N_sma_max - 2 * t * beta2_power / (1 - beta2_power)
+
+        # m_t = beta1 * m + (1 - beta1) * g_t
+        m = self.get_slot(var, "m")
+        m_scaled_g_values = grad * (1 - beta1_t)
+        m_t = tf.assign(m, m * beta1_t, use_locking=self._use_locking)
+        with tf.control_dependencies([m_t]):
+            m_t = tf.assign_add(m, m_scaled_g_values, use_locking=self._use_locking)
+        m_t_hat = m_t / (1 - beta1_power)
+
+        # v_t = beta2 * v + (1 - beta2) * (g_t * g_t)
+        v = self.get_slot(var, "v")
+        v_scaled_g_values = (grad * grad) * (1 - beta2_t)
+        v_t = tf.assign(v, v * beta2_t, use_locking=self._use_locking)
+        with tf.control_dependencies([v_t]):
+            v_t = tf.assign_add(v, v_scaled_g_values, use_locking=self._use_locking)
+        v_sqrt_hat = tf.math.sqrt(v_t / (1 - beta2_power))
+
+        r_t = tf.math.sqrt(
+                (N_sma-4)/(self.N_sma_max-4)*(N_sma-2)/(self.N_sma_max-2)*self.N_sma_max/N_sma)
+
+        s_t = tf.cond(
+            tf.greater(N_sma, 4),
+            lambda: r_t*lr_t*m_t_hat/(v_sqrt_hat+epsilon_t),
+            lambda: lr_t*m_t_hat,
+        )
+        candidates = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.WEIGHTS)
+        if var in candidates:
+            s_t += self.wd*var
+
+        var_cp_update = tf.cond(
+            tf.equal(tf.math.floormod(t, 5), 0),
+            lambda: tf.assign(var_cp, var, use_locking=self._use_locking),
+            lambda: var_cp,
+        )
+        with tf.control_dependencies([var_cp_update]):
+            var_update = tf.cond(
+                tf.equal(tf.math.floormod(t+1, 5), 0),
+                lambda: tf.assign_add(
+                    var, 0.5*(var_cp-s_t-var), use_locking=self._use_locking),
+                lambda: tf.assign_sub(
+                    var, s_t, use_locking=self._use_locking),
+            )
+
+        return tf.group(*[var_update, m_t, v_t, var_cp_update])
+
+    def _apply_sparse_shared(self, grad, var, indices, scatter_add):
+        var_cp = self.get_slot(var, "cp")
+        beta1_power, beta2_power = self._get_beta_accumulators()
+        t = self.get_non_slot("t")
         beta1_power = tf.dtypes.cast(beta1_power, var.dtype.base_dtype)
         beta2_power = tf.dtypes.cast(beta2_power, var.dtype.base_dtype)
         t = tf.dtypes.cast(t, var.dtype.base_dtype)
@@ -591,42 +761,40 @@ class RangerOptimizer(tf.compat.v1.train.AdamOptimizer):
             v_t = scatter_add(v, indices, v_scaled_g_values)
         v_sqrt_hat = tf.math.sqrt(v_t / (1 - beta2_power))
 
-        r_t = tf.math.sqrt((N_sma-4)/(N_sma_max-4)*(N_sma-2)/(N_sma_max-2)*N_sma_max/N_sma)
+        r_t = tf.math.sqrt(
+                (N_sma-4)/(self.N_sma_max-4)*(N_sma-2)/(self.N_sma_max-2)*self.N_sma_max/N_sma)
+
         s_t = tf.cond(
-            tf.greater(N_sma, 5),
-            lambda: lr_t*m_t_hat/(v_sqrt_hat+epsilon_t),
+            tf.greater(N_sma, 4),
+            lambda: r_t*lr_t*m_t_hat/(v_sqrt_hat+epsilon_t),
             lambda: lr_t*m_t_hat,
         )
         candidates = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.WEIGHTS)
         if var in candidates:
             s_t += self.wd*var
-        r1_t = tf.norm(var)
-        r2_t = tf.norm(s_t)
-        s_t *= tf.minimum(r1_t/r2_t, 10.0)
-        s_t = tf.cond(
-            tf.greater(N_sma, 5),
-            lambda: r_t*s_t,
-            lambda: s_t,
+
+        var_cp_update = tf.cond(
+            tf.equal(tf.math.floormod(t, 5), 0),
+            lambda: tf.assign(var_cp, var, use_locking=self._use_locking),
+            lambda: var_cp,
         )
-        var_update = tf.cond(
-            tf.equal(tf.math.floormod(t+1, 5), 0),
-            lambda: tf.assign_add(var, 0.5*(var_cp-s_t-var), use_locking=self._use_locking),
-            lambda: tf.assign_sub(var, s_t, use_locking=self._use_locking),
-        )
-        with tf.control_dependencies([var_update]):
-            var_cp_update = tf.cond(
+        with tf.control_dependencies([var_cp_update]):
+            var_update = tf.cond(
                 tf.equal(tf.math.floormod(t+1, 5), 0),
-                lambda: tf.assign(var_cp, var, use_locking=self._use_locking),
-                lambda: var_cp,
+                lambda: tf.assign_add(
+                    var, 0.5*(var_cp-s_t-var), use_locking=self._use_locking),
+                lambda: tf.assign_sub(
+                    var, s_t, use_locking=self._use_locking),
             )
+
         return tf.group(*[var_update, m_t, v_t, var_cp_update])
 
     def _finish(self, update_ops, name_scope):
         # Update the power accumulators.
         with tf.control_dependencies(update_ops):
             beta1_power, beta2_power = self._get_beta_accumulators()
-            t = self._get_var("t")
-            with tf.colocate_with(beta1_power):
+            t = self.get_non_slot("t")
+            with tf.compat.v1.colocate_with(beta1_power):
                 update_beta1 = beta1_power.assign(
                     beta1_power * self._beta1_t, use_locking=self._use_locking)
                 update_beta2 = beta2_power.assign(
@@ -646,28 +814,12 @@ def optimize_loss(loss,
     """
 
     var_list = tf.compat.v1.trainable_variables(scope=scope) if var_list == None else var_list
-    grad_var_dict = {}
-    for var in var_list:
-        grad_var = tf.compat.v1.get_variable(
-            'grad/'+var.name.split(':')[0],
-            shape=var.shape,
-            dtype=var.dtype,
-            initializer=tf.initializers.zeros(),
-            trainable=False,
-            aggregation=tf.VariableAggregation.MEAN)
-        grad_var_dict[var.name] = grad_var
-    loss = loss if update_every is None else loss/float(update_every)
+    num_replicas = tf.compat.v2.distribute.get_replica_context().num_replicas_in_sync
+    scale = float(1.0/(update_every*num_replicas))
+    loss = loss if update_every is None else loss*scale
+    update_every = 1 if update_every is None else update_every
     grad_var_list = optimizer.compute_gradients(
         loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
-
-    scale = float(1/update_every)
-    new_grad_var_list = []
-    grad_ops = []
-    for (grad, var) in grad_var_list:
-        grad_var = grad_var_dict[var.name]
-        if not grad is None:
-            grad_ops.append(grad_var.assign_add(tf.math.scalar_mul(scale, grad)))
-        new_grad_var_list.append((grad_var, var))
 
     update_ops_ref = tf.compat.v1.get_collection_ref(tf.compat.v1.GraphKeys.UPDATE_OPS)
     update_ops = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS, scope=scope)
@@ -675,31 +827,64 @@ def optimize_loss(loss,
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
 
-    def do_update():
+    def _create_grads(grad_var_list):
+        for grad, var in grad_var_list:
+            if not grad is None:
+                optimizer._zeros_slot(var, "grad", optimizer._name)
+
+    def _accum_grad(grad, var):
+        scope_name = var.op.name
+        with tf.name_scope("update_" + scope_name):
+            grad_var = optimizer.get_slot(var, "grad")
+            if isinstance(grad, tf.Tensor):
+                return grad_var, tf.compat.v1.assign_add(
+                    grad_var, grad, use_locking=optimizer._use_locking)
+            else:
+                assert isinstance(grad, tf.IndexedSlices)
+                return grad_var, tf.compat.v1.scatter_add(
+                    grad_var, grad.indices, grad.values, use_locking=optimizer._use_locking)
+
+    def do_update(update_ops, var_list, grad_vars, grad_ops, global_step):
         with tf.control_dependencies(update_ops+grad_ops):
+            grad_list = [tf.identity(g) for g in grad_ops]
+            grad_var_list = zip(grad_list, var_list)
             train_op = optimizer.apply_gradients(
-                new_grad_var_list,
+                grad_var_list,
                 global_step=global_step)
         with tf.control_dependencies([train_op]):
             clean_ops = []
-            for grad_var in grad_var_dict.values():
+            for grad_var in grad_vars:
                 clean_ops.append(grad_var.assign(tf.zeros_like(grad_var)))
         with tf.control_dependencies(clean_ops):
             new_global_step = tf.identity(global_step)
         return new_global_step
-    def no_update():
+    def no_update(update_ops, grad_ops, global_step):
         with tf.control_dependencies(update_ops+grad_ops):
             new_global_step = global_step.assign_add(1)
         return new_global_step
-    update_every = 1 if update_every is None else update_every
-    def call_once(strategy):
+
+    def call_once(strategy, update_ops, grad_var_list, global_step):
+        with tf.init_scope():
+            _create_grads(grad_var_list)
+        with tf.name_scope(None, optimizer._name):
+            grads, grad_ops = tuple(zip(*[
+                strategy.extended.call_for_each_replica(
+                    _accum_grad, args=(grad, var))
+                for grad, var in grad_var_list if not grad is None
+            ]))
+        var_list = [var for grad, var in grad_var_list if not grad is None]
+        grad_vars = list(grads)
+        grad_ops = list(grad_ops)
         new_global_step = tf.cond(
             tf.equal(tf.math.floormod(global_step+1, update_every), 0),
-            true_fn=lambda: strategy.extended.call_for_each_replica(do_update),
-            false_fn=lambda: strategy.extended.call_for_each_replica(no_update),
+            true_fn=lambda: strategy.extended.call_for_each_replica(
+                do_update, args=(update_ops, var_list, grad_vars, grad_ops, global_step)),
+            false_fn=lambda: strategy.extended.call_for_each_replica(
+                no_update, args=(update_ops, grad_ops, global_step)),
         )
         return new_global_step
-    return tf.distribute.get_replica_context().merge_call(call_once)
+    return tf.distribute.get_replica_context().merge_call(
+        call_once, args=(update_ops, grad_var_list, global_step))
 
 ### Nets ###
 
@@ -768,7 +953,7 @@ def MLP(inputs,
         num_layers,
         hidden_size,
         output_size,
-        activation_fn=tf.nn.selu,
+        activation_fn=gelu,
         dropout=None,
         is_training=True,
         reuse=None,
