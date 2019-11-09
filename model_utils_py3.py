@@ -806,8 +806,8 @@ class RangerOptimizer(tf.compat.v1.train.AdamOptimizer):
 def optimize_loss(loss,
                   global_step,
                   optimizer,
+                  update_every,
                   var_list=None,
-                  update_every=None,
                   scope=None):
     """ Optimize the model using the loss.
 
@@ -816,8 +816,7 @@ def optimize_loss(loss,
     var_list = tf.compat.v1.trainable_variables(scope=scope) if var_list == None else var_list
     num_replicas = tf.compat.v2.distribute.get_replica_context().num_replicas_in_sync
     scale = float(1.0/(update_every*num_replicas))
-    loss = loss if update_every is None else loss*scale
-    update_every = 1 if update_every is None else update_every
+    loss = loss if scale == 1.0 else loss*scale
     grad_var_list = optimizer.compute_gradients(
         loss, var_list, aggregation_method=tf.AggregationMethod.DEFAULT)
 
@@ -827,64 +826,45 @@ def optimize_loss(loss,
         update_ops_ref.remove(op)
     update_ops = list(set(update_ops))
 
-    def _create_grads(grad_var_list):
-        for grad, var in grad_var_list:
-            if not grad is None:
-                optimizer._zeros_slot(var, "grad", optimizer._name)
+    grad_var_list = [(grad, var) for grad, var in grad_var_list if not grad is None]
 
-    def _accum_grad(grad, var):
-        scope_name = var.op.name
-        with tf.name_scope("update_" + scope_name):
-            grad_var = optimizer.get_slot(var, "grad")
-            if isinstance(grad, tf.Tensor):
-                return grad_var, tf.compat.v1.assign_add(
-                    grad_var, grad, use_locking=optimizer._use_locking)
-            else:
-                assert isinstance(grad, tf.IndexedSlices)
-                return grad_var, tf.compat.v1.scatter_add(
-                    grad_var, grad.indices, grad.values, use_locking=optimizer._use_locking)
+    with tf.control_dependencies(update_ops):
+        dumb_op = tf.no_op()
 
-    def do_update(update_ops, var_list, grad_vars, grad_ops, global_step):
-        with tf.control_dependencies(update_ops+grad_ops):
-            grad_list = [tf.identity(g) for g in grad_ops]
-            grad_var_list = zip(grad_list, var_list)
-            train_op = optimizer.apply_gradients(
-                grad_var_list,
-                global_step=global_step)
-        with tf.control_dependencies([train_op]):
-            clean_ops = []
-            for grad_var in grad_vars:
-                clean_ops.append(grad_var.assign(tf.zeros_like(grad_var)))
-        with tf.control_dependencies(clean_ops):
-            new_global_step = tf.identity(global_step)
-        return new_global_step
-    def no_update(update_ops, grad_ops, global_step):
-        with tf.control_dependencies(update_ops+grad_ops):
-            new_global_step = global_step.assign_add(1)
-        return new_global_step
+    def _get_accum_var(var):
+        with tf.variable_scope("grad"):
+            accum_var = tf.compat.v1.get_variable(
+                var.name.split(':')[0],
+                shape=var.shape,
+                dtype=var.dtype,
+                initializer=tf.initializers.zeros(),
+                trainable=False,
+                aggregation=tf.VariableAggregation.MEAN)
+        return accum_var
 
-    def call_once(strategy, update_ops, grad_var_list, global_step):
-        with tf.init_scope():
-            _create_grads(grad_var_list)
-        with tf.name_scope(None, optimizer._name):
-            grads, grad_ops = tuple(zip(*[
-                strategy.extended.call_for_each_replica(
-                    _accum_grad, args=(grad, var))
-                for grad, var in grad_var_list if not grad is None
-            ]))
-        var_list = [var for grad, var in grad_var_list if not grad is None]
-        grad_vars = list(grads)
-        grad_ops = list(grad_ops)
-        new_global_step = tf.cond(
-            tf.equal(tf.math.floormod(global_step+1, update_every), 0),
-            true_fn=lambda: strategy.extended.call_for_each_replica(
-                do_update, args=(update_ops, var_list, grad_vars, grad_ops, global_step)),
-            false_fn=lambda: strategy.extended.call_for_each_replica(
-                no_update, args=(update_ops, grad_ops, global_step)),
-        )
-        return new_global_step
-    return tf.distribute.get_replica_context().merge_call(
-        call_once, args=(update_ops, grad_var_list, global_step))
+    accum_vars = [_get_accum_var(var) for _, var in grad_var_list]
+
+    def _accum_grad(accum_var, grad):
+        if isinstance(grad, tf.Tensor):
+            accum_op = accum_var.assign_add(grad)
+        else:
+            assert(isinstance(grad, tf.IndexedSlices))
+            accum_op = tf.scatter_add(accum_var, grad.indices, grad.values)
+        return accum_op
+
+    accum_ops = [_accum_grad(accum_vars[i], gv[0]) for i, gv in enumerate(grad_var_list)]
+
+    with tf.control_dependencies(accum_ops):
+        accum_op = global_step.assign_add(1)
+
+    train_op = optimizer.apply_gradients(
+        [(accum_vars[i]+gv[0], gv[1]) for i, gv in enumerate(grad_var_list)],
+        global_step=global_step)
+    with tf.control_dependencies([train_op]):
+        clean_ops = [accum_var.assign(tf.zeros_like(accum_var)) for accum_var in accum_vars]
+        update_op = tf.group(*clean_ops)
+
+    return dumb_op, accum_op, update_op
 
 ### Nets ###
 
